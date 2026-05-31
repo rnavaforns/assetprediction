@@ -1,0 +1,52 @@
+name: Data Ingestion Pipeline
+
+# Control de cuándo se ejecuta el workflow
+on:
+  schedule:
+    # Se ejecuta de lunes a viernes a las 22:00 UTC (al cierre de los mercados)
+    - cron: '0 22 * * 1-5'
+  workflow_dispatch:
+    # Esto te permite activar el script manualmente desde la pestaña "Actions" de GitHub cuando quieras
+
+jobs:
+  ingest_data:
+    runs-on: ubuntu-latest
+
+    steps:
+    # 1. Clonar el repositorio en la máquina virtual
+    - name: Checkout repository code
+      uses: actions/checkout@v4
+
+    # 2. Configurar la versión correcta de Python
+    - name: Set up Python
+      uses: actions/actions-setup-python@v5
+      with:
+        python-version: '3.10'
+        cache: 'pip' # Optimiza las ejecuciones futuras recordando las librerías
+
+    # 3. Instalar dependencias del proyecto
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+    # 4. Ejecutar el Pipeline de Mercado (Yahoo Finance)
+    - name: Run Market Ingestion
+      env:
+        SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+        SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
+        SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
+        SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+      run: python scripts/ingesta_market.py
+
+    # 5. Ejecutar el Pipeline Macroeconómico (FRED API)
+    - name: Run Macro Ingestion
+      env:
+        SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+        SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
+        SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
+        SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+        FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+      run: python scripts/ingesta_macro.py
