@@ -46,7 +46,7 @@ def cargar_historico_market():
 
             # Query de inserción idempotente
             insert_query = text("""
-                INSERT INTO market_data (asset_id, trade_date, open, high, low, close, adj_close, volume)
+                INSERT INTO bronze.market_data (asset_id, trade_date, open, high, low, close, adj_close, volume)
                 VALUES (:asset_id, :trade_date, :open, :high, :low, :close, :adj_close, :volume)
                 ON CONFLICT (asset_id, trade_date) DO NOTHING;
             """)

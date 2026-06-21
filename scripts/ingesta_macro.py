@@ -31,7 +31,7 @@ def write_ingestion_log(connection, script_name, status, rows_inserted=0, error_
     """Escribe el resultado de la ejecución en la tabla de logs."""
     try:
         log_query = text("""
-            INSERT INTO ingestion_logs (script_name, status, rows_inserted, error_message)
+            INSERT INTO bronze.ingestion_logs (script_name, status, rows_inserted, error_message)
             VALUES (:script_name, :status, :rows_inserted, :error_message);
         """)
         connection.execute(log_query, {
@@ -63,7 +63,7 @@ def ingesta_macro_incremental():
         
         with engine.connect() as conn:
             # 1. Leer los indicadores registrados en la base de datos
-            macro_query = text("SELECT indicator_id, code FROM macro_indicators;")
+            macro_query = text("SELECT indicator_id, code FROM bronze.macro_indicators;")
             indicators_list = conn.execute(macro_query).fetchall()
             
             if not indicators_list:
@@ -71,7 +71,7 @@ def ingesta_macro_incremental():
 
             # Query idempotente
             insert_query = text("""
-                INSERT INTO macro_data (indicator_id, release_date, reference_period, value)
+                INSERT INTO bronze.macro_data (indicator_id, release_date, reference_period, value)
                 VALUES (:indicator_id, :release_date, :reference_period, :value)
                 ON CONFLICT (indicator_id, release_date) DO NOTHING;
             """)

@@ -42,7 +42,7 @@ def populate_macro_indicators():
             
             for indicator in MACRO_DATA:
                 query = text("""
-                    INSERT INTO macro_indicators (code, name, frequency)
+                    INSERT INTO bronze.macro_indicators (code, name, frequency)
                     VALUES (:code, :name, :frequency)
                     ON CONFLICT (code) DO NOTHING;
                 """)

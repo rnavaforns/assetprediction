@@ -60,7 +60,7 @@ def populate_assets():
                 # En SQLAlchemy, las queries nativas se envuelven en text()
                 # y los parámetros usan la sintaxis de dos puntos (:param)
                 query = text("""
-                    INSERT INTO assets (ticker, name, asset_class)
+                    INSERT INTO bronze.assets (ticker, name, asset_class)
                     VALUES (:ticker, :name, :asset_class)
                     ON CONFLICT (ticker) DO NOTHING;
                 """)

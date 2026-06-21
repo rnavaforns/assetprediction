@@ -31,7 +31,7 @@ def cargar_historico_macro():
             indicators_list = conn.execute(macro_query).fetchall()
 
             insert_query = text("""
-                INSERT INTO macro_data (indicator_id, release_date, reference_period, value)
+                INSERT INTO bronze.macro_data (indicator_id, release_date, reference_period, value)
                 VALUES (:indicator_id, :release_date, :reference_period, :value)
                 ON CONFLICT (indicator_id, release_date) DO NOTHING;
             """)

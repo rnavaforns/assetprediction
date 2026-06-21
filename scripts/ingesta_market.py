@@ -30,7 +30,7 @@ def write_ingestion_log(connection, script_name, status, rows_inserted=0, error_
     """Escribe el resultado de la ejecución en la tabla de logs."""
     try:
         log_query = text("""
-            INSERT INTO ingestion_logs (script_name, status, rows_inserted, error_message)
+            INSERT INTO bronze.ingestion_logs (script_name, status, rows_inserted, error_message)
             VALUES (:script_name, :status, :rows_inserted, :error_message);
         """)
         connection.execute(log_query, {
@@ -52,7 +52,7 @@ def ingesta_market_completa():
         with engine.connect() as conn:
             # 1. Traer todos los activos validados de la tabla maestra
             logger.info("Consultando activos registrados en la tabla 'assets'...")
-            assets_query = text("SELECT asset_id, ticker FROM assets;")
+            assets_query = text("SELECT asset_id, ticker FROM bronze.assets;")
             assets_list = conn.execute(assets_query).fetchall()
             
             if not assets_list:
@@ -86,7 +86,7 @@ def ingesta_market_completa():
                 
                 # Preparar la query (la query SQL sigue igual, solo cambian las claves del diccionario de abajo)
                 insert_query = text("""
-                    INSERT INTO market_data (asset_id, trade_date, open, high, low, close, adj_close, volume)
+                    INSERT INTO bronze.market_data (asset_id, trade_date, open, high, low, close, adj_close, volume)
                     VALUES (:asset_id, :trade_date, :open, :high, :low, :close, :adj_close, :volume)
                     ON CONFLICT (asset_id, trade_date) DO NOTHING;
                 """)
