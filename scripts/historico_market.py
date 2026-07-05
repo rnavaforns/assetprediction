@@ -26,7 +26,6 @@ def get_db_engine():
     return create_engine(connection_string)
 
 def cargar_historico_market():
-    # Definimos la fecha de inicio histórica alineada con la macro (5 años atrás)
     FECHA_INICIO_HISTORICO = "2021-01-01"
     engine = get_db_engine()
     rows_inserted = 0
@@ -35,12 +34,12 @@ def cargar_historico_market():
 
     try:
         with engine.connect() as conn:
-            # 1. Traer todos los activos de la tabla maestra
-            assets_query = text("SELECT asset_id, ticker FROM assets;")
+            # 1. Traer todos los activos de la tabla maestra (apuntando a bronze)
+            assets_query = text("SELECT asset_id, ticker FROM bronze.assets;")
             assets_list = conn.execute(assets_query).fetchall()
             
             if not assets_list:
-                raise ValueError("No hay activos en la tabla 'assets'.")
+                raise ValueError("No hay activos en la tabla 'bronze.assets'.")
             
             logger.info(f"Se han encontrado {len(assets_list)} activos para poblar el histórico.")
 
@@ -51,38 +50,48 @@ def cargar_historico_market():
                 ON CONFLICT (asset_id, trade_date) DO NOTHING;
             """)
 
-            # 2. Iterar por cada activo y descargar su pasado
+            # 2. Iterar por cada activo calculando su ventana temporal óptima
             for asset_id, ticker in assets_list:
-                logger.info(f"Descargando histórico completo para el ticker: {ticker}")
                 
-                # Descargamos usando la fecha de inicio fijada y desactivando auto_adjust
-                df = yf.download(ticker, start=FECHA_INICIO_HISTORICO, progress=False, auto_adjust=False)
+                # Consultar si ya existen datos para este activo y obtener la fecha más antigua guardada
+                check_query = text("""
+                    SELECT MIN(trade_date) FROM bronze.market_data WHERE asset_id = :asset_id;
+                """)
+                min_date_existente = conn.execute(check_query, {"asset_id": asset_id}).scalar()
+                
+                # Configurar dinámicamente las fechas de descarga según tu objetivo
+                if min_date_existente is None:
+                    # CASO 1: Producto nuevo. Descarga desde 2021 hasta hoy de forma abierta
+                    logger.info(f"🔄 Ticker {ticker} no tiene datos previos. Descargando completo desde {FECHA_INICIO_HISTORICO} hasta hoy.")
+                    df = yf.download(ticker, start=FECHA_INICIO_HISTORICO, progress=False, auto_adjust=False)
+                else:
+                    # CASO 2: Ya existen datos (ej. desde Abril 2026). Rellenar el pasado de 2021 a Abril 2026
+                    fecha_fin_backfill = min_date_existente.strftime('%Y-%m-%d')
+                    logger.info(f"⏳ Ticker {ticker} ya tiene datos desde {fecha_fin_backfill}. Rellenando hueco histórico ({FECHA_INICIO_HISTORICO} ➔ {fecha_fin_backfill}).")
+                    df = yf.download(ticker, start=FECHA_INICIO_HISTORICO, end=fecha_fin_backfill, progress=False, auto_adjust=False)
                 
                 if df.empty:
-                    logger.warning(f"⚠ No se encontraron datos históricos para: {ticker}")
+                    logger.warning(f"⚠ No se encontraron datos históricos para: {ticker} en el rango solicitado.")
                     continue
                 
-                # Normalización y blindaje de columnas (Multilndex y minúsculas)
+                # Normalización y blindaje de columnas
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
                 
                 df.columns = [str(col).strip().lower() for col in df.columns]
                 
-                # Red de seguridad para el Cierre Ajustado
                 if 'adj close' not in df.columns:
                     df['adj close'] = df['close']
                 
-                # Limpieza de nulos
                 df = df.dropna(subset=['open', 'high', 'low', 'close', 'adj close'])
                 
-                logger.info(f"Guardando {len(df)} días de cotización para {ticker}...")
-                
                 # 3. Guardar en Supabase fila por fila
+                ticker_inserted = 0
                 for date_index, row in df.iterrows():
                     trade_date = date_index.date()
                     vol = int(row['volume']) if pd.notnull(row['volume']) else 0
                     
-                    conn.execute(insert_query, {
+                    result = conn.execute(insert_query, {
                         "asset_id": asset_id,
                         "trade_date": trade_date,
                         "open": float(row['open']),
@@ -92,11 +101,17 @@ def cargar_historico_market():
                         "adj_close": float(row['adj close']),
                         "volume": vol
                     })
-                    rows_inserted += 1
+                    
+                    if result.rowcount > 0:
+                        ticker_inserted += 1
+                        rows_inserted += 1
+                
+                if ticker_inserted > 0:
+                    logger.info(f"✔ Guardados {ticker_inserted} registros históricos para {ticker}.")
             
-            # Confirmar la transacción masiva
+            # Confirmar los cambios
             conn.commit()
-            logger.info(f"🔥 ¡CARGA HISTÓRICA DE MERCADO FINALIZADA! Total registros indexados: {rows_inserted}")
+            logger.info(f"🔥 ¡CARGA HISTÓRICA DE MERCADO FINALIZADA! Total nuevos registros indexados: {rows_inserted}")
             
     except Exception as e:
         logger.error(f"Error crítico en la carga histórica de mercado: {e}")

@@ -50,3 +50,13 @@ jobs:
         SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
         FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
       run: python scripts/ingesta_macro.py
+
+    - name: Run Sentiment Ingestion
+      env:
+        SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+        SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
+        SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
+        SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+        FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+      run: python scripts/ingesta_sentiment.py
