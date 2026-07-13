@@ -51,6 +51,7 @@ jobs:
         FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
       run: python scripts/ingesta_macro.py
 
+    # 6. Ejecutar el Pipeline de Sentimiento
     - name: Run Sentiment Ingestion
       env:
         SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
@@ -60,6 +61,8 @@ jobs:
         SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
         FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
       run: python scripts/ingesta_sentiment.py
+      
+    # 7. Transformación Bronze -> Silver
     - name: Transformación Bronze -> Silver
       env:
         SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
@@ -69,3 +72,14 @@ jobs:
         SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
         FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
       run: python scripts/transform_silver.py
+
+    # 8. Transformación Silver -> Gold
+    - name: Transformación Silver -> Gold
+      env:
+        # Gold solo necesita acceso a la base de datos, sin APIs externas
+        SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+        SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
+        SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
+        SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+      run: python scripts/build_gold.py --horizon 5
