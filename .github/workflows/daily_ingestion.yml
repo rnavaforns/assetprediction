@@ -83,3 +83,13 @@ jobs:
         SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
         SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
       run: python scripts/build_gold.py --horizon 5
+
+    - name: Train XGBoost Model
+      env:
+        SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+        SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
+        SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
+        SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      run: python scripts/train_xgboost.py

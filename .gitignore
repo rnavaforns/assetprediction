@@ -1,2 +1,4 @@
 .env
 .venv/
+wandb/
+xgb_model.json
