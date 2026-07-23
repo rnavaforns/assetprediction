@@ -22,15 +22,25 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: '3.12'
-        cache: 'pip' # Optimiza las ejecuciones futuras recordando las librerías
+        cache: 'pip' # Optimiza las ejecuciones futuras recordando las librerías de pip
 
-    # 3. Instalar dependencias del proyecto
+    # 3. Cachear el modelo de Hugging Face (FinBERT)
+    - name: Cache Hugging Face models
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/huggingface
+        key: ${{ runner.os }}-hf-finbert
+        restore-keys: |
+          ${{ runner.os }}-hf-
+
+    # 4. Instalar dependencias del proyecto (con versión ligera de PyTorch para CPU)
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
+        pip install torch --extra-index-url https://download.pytorch.org/whl/cpu
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-    # 4. Ejecutar el Pipeline de Mercado (Yahoo Finance)
+    # 5. Ejecutar el Pipeline de Mercado (Yahoo Finance)
     - name: Run Market Ingestion
       env:
         SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
@@ -40,7 +50,7 @@ jobs:
         SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
       run: python scripts/ingesta_market.py
 
-    # 5. Ejecutar el Pipeline Macroeconómico (FRED API)
+    # 6. Ejecutar el Pipeline Macroeconómico (FRED API)
     - name: Run Macro Ingestion
       env:
         SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
@@ -51,7 +61,7 @@ jobs:
         FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
       run: python scripts/ingesta_macro.py
 
-    # 6. Ejecutar el Pipeline de Sentimiento
+    # 7. Ejecutar el Pipeline de Sentimiento (FinBERT)
     - name: Run Sentiment Ingestion
       env:
         SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
@@ -62,7 +72,7 @@ jobs:
         FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
       run: python scripts/ingesta_sentiment.py
       
-    # 7. Transformación Bronze -> Silver
+    # 8. Transformación Bronze -> Silver
     - name: Transformación Bronze -> Silver
       env:
         SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
@@ -73,7 +83,7 @@ jobs:
         FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
       run: python scripts/transform_silver.py
 
-    # 8. Transformación Silver -> Gold
+    # 9. Transformación Silver -> Gold
     - name: Transformación Silver -> Gold
       env:
         # Gold solo necesita acceso a la base de datos, sin APIs externas
@@ -84,6 +94,7 @@ jobs:
         SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
       run: python scripts/build_gold.py --horizon 5
 
+    # 10. Entrenar el Modelo XGBoost
     - name: Train XGBoost Model
       env:
         SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}

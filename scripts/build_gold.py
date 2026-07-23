@@ -118,7 +118,7 @@ def read_macro_data(engine):
 
 
 def read_sentiment_data(engine):
-    """Lee fact_sentiment."""
+    """Lee fact_sentiment incluyendo las nuevas métricas desglosadas."""
     logger.info("[3/7] Leyendo datos de sentimiento...")
 
     query = """
@@ -126,6 +126,10 @@ def read_sentiment_data(engine):
         fs.asset_key,
         fs.publish_date AS trade_date,
         fs.sentiment_score,
+        fs.sentiment_pos,
+        fs.sentiment_neg,
+        fs.sentiment_neu,
+        fs.sentiment_std,
         fs.article_count
     FROM silver.fact_sentiment fs
     ORDER BY fs.asset_key, fs.publish_date
@@ -193,15 +197,15 @@ def merge_all(df_market, df_macro_daily, df_sentiment):
             how='left'
         )
         
-        # CAMBIO: Imputación explícita de sentimiento para evitar matrices esparcidas o errores de ML por NaNs.
-        # Rellenamos scores sin sentimiento a 0.0 (neutro/ausencia) y el conteo de artículos a 0.
-        df['sentiment_score'] = df['sentiment_score'].fillna(0.0)
-        df['article_count'] = df['article_count'].fillna(0)
+        pass 
     else:
-        # CAMBIO: En vez de np.nan, creamos las columnas desde cero con valores neutros por defecto.
-        df['sentiment_score'] = 0.0
-        df['article_count'] = 0
-        logger.info("      Sentiment vacío — columnas creadas con valores neutros (0.0).")
+        df['sentiment_score'] = np.nan
+        df['sentiment_pos'] = np.nan
+        df['sentiment_neg'] = np.nan
+        df['sentiment_neu'] = np.nan
+        df['sentiment_std'] = np.nan
+        df['article_count'] = np.nan
+        logger.info("      Sentiment vacío — columnas creadas con valores NaN.")
 
     logger.info(f"      Resultado: {len(df):,} filas × {len(df.columns)} columnas")
     return df
@@ -299,13 +303,9 @@ def calculate_technical_indicators(df):
 
     df_out = pd.concat(results, ignore_index=True)
     
-    # CAMBIO: Implementación del Warm-up estricto. Eliminamos los primeros 252 registros
-    # de cada activo para garantizar que indicadores largos (ej. SMA200, return_252d)
-    # tengan datos reales en lugar de ruido.
-    logger.info("       Aplicando periodo de warm-up (descartando primeros 252 días por activo)...")
+    # Warm-up estricto. Eliminamos los primeros 252 registros
+    logger.info("      Aplicando periodo de warm-up (descartando primeros 252 días por activo)...")
     
-    # Creamos un contador de filas por cada activo y filtramos. 
-    # Mucho más seguro y rápido que .apply()
     df_out['row_num'] = df_out.groupby('ticker').cumcount()
     df_out = df_out[df_out['row_num'] >= 252].drop(columns=['row_num']).reset_index(drop=True)
 
@@ -330,10 +330,6 @@ def calculate_target(df, horizon=5):
     n_nulls = df['forward_return_5d'].isna().sum()
     logger.info(f"      {n_nulls} filas sin target (últimos {horizon} días por activo).")
     return df
-
-# CAMBIO: Se ha eliminado completamente la función `mark_train_test`. 
-# La responsabilidad del split temporal se traslada a los scripts de entrenamiento (ML)
-# permitiendo así validación cruzada y flexibilidad algorítmica sin alterar la BDD.
 
 
 # ============================================================
@@ -362,8 +358,7 @@ def write_to_gold(df, engine):
         'unrate', 'jobless_claims_transformed', 'pmi_transformed',
         'yield_10y', 'yield_2y', 'yield_curve_spread',
         'dxy_transformed', 'oil_transformed', 'vix',
-        'sentiment_score', 'article_count',
-        # CAMBIO: 'is_train' ha sido eliminado de la proyección final.
+        'sentiment_score', 'sentiment_pos', 'sentiment_neg', 'sentiment_neu', 'sentiment_std', 'article_count',
         'forward_return_5d', 'is_outlier', 
     ]
 
@@ -374,15 +369,12 @@ def write_to_gold(df, engine):
 
     df_out = df[columns].copy()
 
-    # CAMBIO: Manejo de la atomicidad de la base de datos (Transacción única).
-    # Utilizamos engine.begin() que inicia una transacción (COMMIT al terminar el bloque con éxito, ROLLBACK si falla).
-    # Reemplazamos DELETE por TRUNCATE para mayor eficiencia en tablas grandes.
     try:
         with engine.begin() as conn:
             conn.execute(text("TRUNCATE TABLE gold.training_dataset"))
             df_out.to_sql(
                 'training_dataset',
-                con=conn,  # Escribimos usando la conexión transaccional
+                con=conn,
                 schema='gold',
                 if_exists='append',
                 index=False,
@@ -395,7 +387,6 @@ def write_to_gold(df, engine):
         raise e
 
     with engine.connect() as conn:
-        # CAMBIO: Actualizamos la query de verificación eliminando las cuentas de `is_train` e `is_test`.
         result = conn.execute(text("""
             SELECT
                 COUNT(*) AS total_filas,
@@ -438,7 +429,6 @@ def log_transformation(engine, script_name, status, rows=0, error=None):
 # ============================================================
 def main():
     parser = argparse.ArgumentParser(description="Build Gold training_dataset")
-    # CAMBIO: Eliminado el argumento --split-date
     parser.add_argument('--horizon', type=int, default=5,
                         help='Horizonte de predicción en días (default: 5)')
     args = parser.parse_args()
@@ -456,8 +446,6 @@ def main():
         df = merge_all(df_market, df_macro_daily, df_sentiment)
         df = calculate_technical_indicators(df)
         df = calculate_target(df, horizon=args.horizon)
-
-        # CAMBIO: Eliminada la llamada a la función mark_train_test(df)
 
         write_to_gold(df, engine)
 

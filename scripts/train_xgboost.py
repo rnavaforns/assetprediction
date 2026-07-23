@@ -21,7 +21,9 @@ CONFIG = {
     "max_depth": 5,
     "subsample": 0.8,
     "colsample_bytree": 0.8,
-    "random_state": 42
+    "random_state": 42,
+    # Añadido para documentar en W&B qué set de variables se está usando
+    "feature_set": "technical_macro_sentiment" 
 }
 
 def load_gold_data() -> pd.DataFrame:
@@ -46,17 +48,18 @@ def load_gold_data() -> pd.DataFrame:
     return df
 
 def main():
-    # 2. Inicializar Weights & Biases
+    # 2. Inicializar Weights & Biases (Nuevo nombre para el experimento)
     wandb.init(
         project="tfm-market-prediction",
-        name=f"xgb-baseline-5d-{datetime.now().strftime('%Y-%m-%d')}",
+        name=f"xgb-sentiment-5d-{datetime.now().strftime('%Y-%m-%d')}",
         config=CONFIG
     )
     
     # 3. Preparación de datos
     df = load_gold_data()
     
-    features_to_drop = ['asset_key', 'ticker', 'trade_date', 'asset_class', 'region', 'sector', 'forward_return_5d']
+    # Añadido 'is_outlier' a features_to_drop porque es un valor constante (False)
+    features_to_drop = ['asset_key', 'ticker', 'trade_date', 'asset_class', 'region', 'sector', 'forward_return_5d', 'is_outlier']
     
     X = df.drop(columns=features_to_drop)
     y = df['forward_return_5d'].astype(float)
@@ -115,14 +118,14 @@ def main():
     wandb.log({"feature_importance": wandb.Image(fig)})
     plt.close()
     
-    # 9. Guardar y Versionar el Modelo como Artifact en W&B
+    # 9. Guardar y Versionar el Modelo como Artifact en W&B (Nuevo Artifact)
     model_path = "xgb_model.json"
     model.save_model(model_path)
     
     artifact = wandb.Artifact(
-        name="xgboost-baseline", 
+        name="xgboost-sentiment-model", 
         type="model",
-        description="Modelo base de regresión XGBoost prediciendo forward_return_5d"
+        description="Modelo de regresión XGBoost prediciendo forward_return_5d incluyendo variables de sentimiento"
     )
     artifact.add_file(model_path)
     wandb.log_artifact(artifact)

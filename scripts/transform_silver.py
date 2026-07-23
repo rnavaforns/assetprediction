@@ -350,6 +350,7 @@ ON CONFLICT (indicator_key, release_date) DO UPDATE SET
 # ----------------------------------------------------------
 # STEP 6: FACT_SENTIMENT
 # FIX W2: Soporta sentimiento global (asset_id NULL)
+# UPDATE: Incorpora sentiment_pos, sentiment_neg, sentiment_neu, sentiment_std
 # ----------------------------------------------------------
 SQL_FACT_SENTIMENT = """
 WITH clean_sentiment AS (
@@ -358,6 +359,10 @@ WITH clean_sentiment AS (
         s.publish_date,
         s.sentiment_score,
         s.article_count,
+        s.sentiment_pos,
+        s.sentiment_neg,
+        s.sentiment_neu,
+        s.sentiment_std,
         ROW_NUMBER() OVER (
             PARTITION BY COALESCE(s.asset_id, -1), s.publish_date
             ORDER BY s.id DESC
@@ -366,19 +371,28 @@ WITH clean_sentiment AS (
     LEFT JOIN silver.dim_assets da ON s.asset_id = da.asset_id_bronze
 )
 INSERT INTO silver.fact_sentiment (
-    asset_key, publish_date, sentiment_score, article_count
+    asset_key, publish_date, sentiment_score, article_count,
+    sentiment_pos, sentiment_neg, sentiment_neu, sentiment_std
 )
 SELECT
     asset_key,
     publish_date,
     sentiment_score,
-    article_count
+    article_count,
+    sentiment_pos,
+    sentiment_neg,
+    sentiment_neu,
+    sentiment_std
 FROM clean_sentiment
 WHERE rn = 1
 -- CORRECCIÓN: El target debe ser idéntico al UNIQUE NULLS NOT DISTINCT de tu DDL
 ON CONFLICT (publish_date, asset_key) DO UPDATE SET
     sentiment_score = EXCLUDED.sentiment_score,
-    article_count = EXCLUDED.article_count;
+    article_count = EXCLUDED.article_count,
+    sentiment_pos = EXCLUDED.sentiment_pos,
+    sentiment_neg = EXCLUDED.sentiment_neg,
+    sentiment_neu = EXCLUDED.sentiment_neu,
+    sentiment_std = EXCLUDED.sentiment_std;
 """
 
 
