@@ -207,6 +207,9 @@ def merge_all(df_market, df_macro_daily, df_sentiment):
         df['article_count'] = np.nan
         logger.info("      Sentiment vacío — columnas creadas con valores NaN.")
 
+    df['sentiment_weighted'] = df['sentiment_score'] * np.log(1 + df['article_count'].fillna(0))
+    df.loc[df['article_count'].isna(), 'sentiment_weighted'] = np.nan
+
     logger.info(f"      Resultado: {len(df):,} filas × {len(df.columns)} columnas")
     return df
 
@@ -358,7 +361,7 @@ def write_to_gold(df, engine):
         'unrate', 'jobless_claims_transformed', 'pmi_transformed',
         'yield_10y', 'yield_2y', 'yield_curve_spread',
         'dxy_transformed', 'oil_transformed', 'vix',
-        'sentiment_score', 'sentiment_pos', 'sentiment_neg', 'sentiment_neu', 'sentiment_std', 'article_count',
+        'sentiment_score', 'sentiment_pos', 'sentiment_neg', 'sentiment_neu', 'sentiment_std', 'sentiment_weighted', 'sentiment_ema_3', 'sentiment_ema_5', 'article_count',
         'forward_return_5d', 'is_outlier', 
     ]
 
@@ -423,6 +426,27 @@ def log_transformation(engine, script_name, status, rows=0, error=None):
     except Exception as e:
         logger.error(f"Error guardando log: {e}")
 
+def calculate_sentiment_ema(df):
+    """Calcula la Media Móvil Exponencial del sentimiento por activo."""
+    logger.info("Calculando EMAs de sentimiento...")
+    
+    results = []
+    for ticker, group in df.groupby('ticker'):
+        g = group.sort_values('trade_date').copy()
+        
+        # Calculamos la EMA ignorando los NaN (min_periods=1 para que empiece a calcular cuanto antes)
+        # span=3 y span=5 corresponden a las ventanas temporales
+        g['sentiment_ema_3'] = g['sentiment_score'].ewm(span=3, adjust=False, min_periods=1).mean()
+        g['sentiment_ema_5'] = g['sentiment_score'].ewm(span=5, adjust=False, min_periods=1).mean()
+        
+        # Si un día no hay noticia (era NaN originalmente), podemos decidir si la EMA decae 
+        # o si mantenemos el NaN. Lo más limpio para XGBoost es que si no hay rastro, mantenga NaN
+        # o arrastre la inercia. Dejaremos que pandas haga el ewm y aseguramos los NaN donde no había datos base:
+        g.loc[g['sentiment_score'].isna(), ['sentiment_ema_3', 'sentiment_ema_5']] = np.nan
+        
+        results.append(g)
+        
+    return pd.concat(results, ignore_index=True)
 
 # ============================================================
 # PIPELINE PRINCIPAL
@@ -444,6 +468,7 @@ def main():
         df_macro_daily = pivot_and_forwardfill_macro(df_market, df_macro)
 
         df = merge_all(df_market, df_macro_daily, df_sentiment)
+        df = calculate_sentiment_ema(df)
         df = calculate_technical_indicators(df)
         df = calculate_target(df, horizon=args.horizon)
 
