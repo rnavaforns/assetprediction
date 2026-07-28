@@ -198,8 +198,26 @@ def ingesta_sentiment_diaria():
                     fuente = art['source']
                     
                     # Inferencia NLP
-                    raw_results = finbert(texto_a_analizar)[0]
-                    scores_dict = {item['label']: item['score'] for item in raw_results}
+                    raw_output = finbert(texto_a_analizar, top_k=None)
+                    
+                    # Adaptación dinámica a la estructura de salida de Hugging Face
+                    if isinstance(raw_output, list) and len(raw_output) > 0:
+                        if isinstance(raw_output[0], list):
+                            # Formato anidado: [[{...}, {...}]] -> Extraemos la lista interna
+                            lista_scores = raw_output[0]
+                        elif isinstance(raw_output[0], dict):
+                            # Formato plano: [{...}, {...}] -> Ya es la lista correcta
+                            lista_scores = raw_output
+                        else:
+                            lista_scores = []
+                    elif isinstance(raw_output, dict):
+                        # Fallback por si la API devuelve un diccionario puro: {...}
+                        lista_scores = [raw_output]
+                    else:
+                        lista_scores = []
+
+                    # Generamos el diccionario de scores de forma segura
+                    scores_dict = {item['label']: item['score'] for item in lista_scores}
                     
                     p_pos = scores_dict.get('positive', 0.0)
                     p_neg = scores_dict.get('negative', 0.0)
