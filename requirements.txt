@@ -36,4 +36,4 @@ urllib3==2.7.0
 wandb>=0.16.0
 websockets==16.0
 xgboost>=2.0.0
-yfinance==1.4.1
+yfinance==1.4.1optuna

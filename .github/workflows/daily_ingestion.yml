@@ -1,4 +1,4 @@
-name: Data Ingestion Pipeline
+name: Data Ingestion & Model Training Pipeline
 
 # Control de cuándo se ejecuta el workflow
 on:
@@ -9,7 +9,7 @@ on:
     # Permite activar el script manualmente desde la pestaña "Actions" de GitHub
 
 jobs:
-  ingest_data:
+  ingest_and_train:
     runs-on: ubuntu-latest
 
     steps:
@@ -93,7 +93,7 @@ jobs:
         SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
       run: python scripts/build_gold.py --horizon 5
 
-    # 10. Extracción Única: Crea el .parquet local (1 sola consulta BDD)
+    # 10. Extracción Única: Crea el .parquet local
     - name: Fetch Gold Dataset to Local Parquet
       env:
         SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
@@ -103,14 +103,46 @@ jobs:
         SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
       run: python scripts/fetch_data.py
 
-    # 11. Entrenar Modelo Regresor (Lee desde el .parquet local)
-    - name: Train XGBoost Regressor
+    # =========================================================================
+    # MODELOS DE REGRESIÓN (ESTUDIO DE ABLACIÓN)
+    # =========================================================================
+
+    # 11. Regresor Baseline (Split 80/20 simple, MSE Loss)
+    - name: Train Baseline XGBoost Regressor
       env:
         WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
       run: python scripts/train_xgboost.py
 
-    # 12. Entrenar Modelo Clasificador (Lee desde el .parquet local)
-    - name: Train XGBoost Classifier
+    # 12. Regresor Walk-Forward (CV con embargo de 5 días)
+    - name: Train XGBoost Walk-Forward Regressor
+      env:
+        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      run: python scripts/train_xgb_walkforward.py
+
+    # 13. Regresor Baseline con Pseudo-Huber Loss + Optuna
+    - name: Train XGBoost Regressor (Pseudo-Huber + Optuna)
+      env:
+        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      run: python scripts/train_xgboost_huber.py
+
+    # 14. Modelo Regresor Final (Walk-Forward CV + Embargo + Pseudo-Huber + Optuna)
+    - name: Train XGBoost Walk-Forward Regressor (Pseudo-Huber + Optuna)
+      env:
+        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      run: python scripts/train_xgb_walkforward_huber.py
+
+    # =========================================================================
+    # MODELOS DE CLASIFICACIÓN (DIRECCIONAL SUBE/BAJA)
+    # =========================================================================
+
+    # 15. Clasificador Baseline (Split 80/20 simple)
+    - name: Train Baseline XGBoost Classifier
       env:
         WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
       run: python scripts/train_xgb_classifier.py
+
+    # 16. Clasificador Avanzado (Walk-Forward CV + Embargo + Optuna)
+    - name: Train XGBoost Walk-Forward Classifier (Optuna)
+      env:
+        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      run: python scripts/train_xgb_walkforward_classifier.py
