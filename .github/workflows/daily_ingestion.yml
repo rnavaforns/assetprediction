@@ -125,24 +125,54 @@ jobs:
         WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
       run: python scripts/train_xgboost_huber.py
 
-    # 14. Modelo Regresor Final (Walk-Forward CV + Embargo + Pseudo-Huber + Optuna)
+    # 14. Modelo Regresor con (Walk-Forward CV + Embargo + Pseudo-Huber + Optuna)
     - name: Train XGBoost Walk-Forward Regressor (Pseudo-Huber + Optuna)
       env:
         WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
       run: python scripts/train_xgb_walkforward_huber.py
 
+    # 15. Modelo regresor con (Walk-Forward CV + Embargo + Pseudo-Huber + Optuna) incluyendo variables temporales
+    - name: Train XGBoost Walk-Forward Regressor (Pseudo-Huber + Optuna) with time variables
+      env:
+        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      run: python scripts/train_xgb_walkforward_huber_time.py
+
+    # 16. Modelo CatBoost regresor con Walk-Forward + PseudoHuber + Optuna
+    - name: Train CatBoost Walk-Forward Regressor (Pseudo-Huber + Optuna)
+      env:
+        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      run: python scripts/catboost_regression.py
+
+    # 17. Modelo TFT Regresor
+    - name: Train Temporal Fusion Transformer (TFT) Regressor
+      env:
+        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      run: python scripts/train_tft.py
+
+    #18. Modelo TFT Regresor con WalkForward
+    - name: Train Temporal Fusion Transformer (TFT) with WalkForward
+      env:
+        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      run: python scripts/train_tft_walkforward.py
+
     # =========================================================================
     # MODELOS DE CLASIFICACIÓN (DIRECCIONAL SUBE/BAJA)
     # =========================================================================
 
-    # 15. Clasificador Baseline (Split 80/20 simple)
+    # 19. Clasificador Baseline (Split 80/20 simple)
     - name: Train Baseline XGBoost Classifier
       env:
         WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
       run: python scripts/train_xgb_classifier.py
 
-    # 16. Clasificador Avanzado (Walk-Forward CV + Embargo + Optuna)
+    # 20. Clasificador Avanzado (Walk-Forward CV + Embargo + Optuna)
     - name: Train XGBoost Walk-Forward Classifier (Optuna)
       env:
         WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
       run: python scripts/train_xgb_walkforward_classifier.py
+
+    # 21. Clasificador CatBoost (Walk-Forward CV + Embargo + Optuna)
+    - name: Train CatBoost Walk-Forward Classifier (Optuna)
+      env:
+        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      run: python scripts/catboost_classification.py

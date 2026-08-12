@@ -38,3 +38,6 @@ websockets==16.0
 xgboost>=2.0.0
 yfinance==1.4.1optuna
 catboost
+torch>=2.0.0
+pytorch-lightning>=2.0.0
+pytorch-forecasting>=1.0.0
