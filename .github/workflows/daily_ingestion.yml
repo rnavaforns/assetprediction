@@ -6,7 +6,7 @@ on:
     # Se ejecuta de lunes a viernes a las 22:00 UTC (al cierre de los mercados)
     - cron: '0 22 * * 1-5'
   workflow_dispatch:
-    # Esto te permite activar el script manualmente desde la pestaña "Actions" de GitHub cuando quieras
+    # Permite activar el script manualmente desde la pestaña "Actions" de GitHub
 
 jobs:
   ingest_data:
@@ -22,7 +22,7 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: '3.12'
-        cache: 'pip' # Optimiza las ejecuciones futuras recordando las librerías de pip
+        cache: 'pip' # Optimiza ejecuciones futuras recordando las librerías de pip
 
     # 3. Cachear el modelo de Hugging Face (FinBERT)
     - name: Cache Hugging Face models
@@ -86,7 +86,6 @@ jobs:
     # 9. Transformación Silver -> Gold
     - name: Transformación Silver -> Gold
       env:
-        # Gold solo necesita acceso a la base de datos, sin APIs externas
         SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
         SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
@@ -94,13 +93,24 @@ jobs:
         SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
       run: python scripts/build_gold.py --horizon 5
 
-    # 10. Entrenar el Modelo XGBoost
-    - name: Train XGBoost Model
+    # 10. Extracción Única: Crea el .parquet local (1 sola consulta BDD)
+    - name: Fetch Gold Dataset to Local Parquet
       env:
         SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
         SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
         SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
         SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+      run: python scripts/fetch_data.py
+
+    # 11. Entrenar Modelo Regresor (Lee desde el .parquet local)
+    - name: Train XGBoost Regressor
+      env:
         WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
       run: python scripts/train_xgboost.py
+
+    # 12. Entrenar Modelo Clasificador (Lee desde el .parquet local)
+    - name: Train XGBoost Classifier
+      env:
+        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      run: python scripts/train_xgb_classifier.py

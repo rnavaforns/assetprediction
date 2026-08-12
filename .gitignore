@@ -2,3 +2,4 @@
 .venv/
 wandb/
 xgb_model.json
+data/

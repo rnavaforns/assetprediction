@@ -26,25 +26,29 @@ CONFIG = {
     "feature_set": "technical_macro_sentiment" 
 }
 
-def load_gold_data() -> pd.DataFrame:
-    """Extrae los datos de Supabase filtrando outliers y nulos de la variable objetivo."""
-    print("Conectando a Supabase...")
-    db_user = os.getenv("SUPABASE_DB_USER")
-    db_pass = os.getenv("SUPABASE_DB_PASSWORD")
-    db_host = os.getenv("SUPABASE_DB_HOST")
-    db_port = os.getenv("SUPABASE_DB_PORT")
-    db_name = os.getenv("SUPABASE_DB_NAME")
+def load_gold_data(parquet_path: str = "data/gold_dataset.parquet") -> pd.DataFrame:
+    """Carga los datos desde el archivo Parquet local generado por fetch_data.py."""
+    print(f"Cargando datos desde {parquet_path}...")
     
-    engine = create_engine(f"postgresql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
+    if not os.path.exists(parquet_path):
+        raise FileNotFoundError(
+            f"❌ No se encontró el archivo '{parquet_path}'. "
+            "Ejecuta primero el script de descarga: 'python3 scripts/fetch_data.py'"
+        )
     
-    query = """
-        SELECT * FROM gold.training_dataset 
-        WHERE is_outlier = false 
-        AND forward_return_5d IS NOT NULL
-        ORDER BY trade_date ASC
-    """
-    df = pd.read_sql(query, engine)
-    print(f"Datos cargados: {df.shape[0]} filas, {df.shape[1]} columnas.")
+    df = pd.read_parquet(parquet_path)
+    
+    # Filtros defensivos en memoria
+    if 'is_outlier' in df.columns:
+        df = df[df['is_outlier'] == False]
+        
+    if 'forward_return_5d' in df.columns:
+        df = df[df['forward_return_5d'].notnull()]
+        
+    if 'trade_date' in df.columns:
+        df = df.sort_values('trade_date', ascending=True).reset_index(drop=True)
+        
+    print(f"✔ Datos cargados con éxito desde Parquet: {df.shape[0]} filas, {df.shape[1]} columnas.")
     return df
 
 def main():
