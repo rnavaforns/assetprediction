@@ -220,48 +220,45 @@ ON CONFLICT (code) DO UPDATE SET
 # ----------------------------------------------------------
 SQL_FACT_MARKET_PRICES = """
 WITH recent_bronze AS (
-    SELECT * 
-    FROM bronze.market_data
-    WHERE trade_date >= (CURRENT_DATE - (:lookback_days * INTERVAL '1 day'))::DATE
-),
-ranked_prices AS (
     SELECT
-        da.asset_key,
+        m.asset_id,
         m.trade_date,
         m.open, m.high, m.low, m.close, m.adj_close, m.volume,
         LAG(m.adj_close) OVER (PARTITION BY m.asset_id ORDER BY m.trade_date) AS prev_adj_close,
         LAG(m.close) OVER (PARTITION BY m.asset_id ORDER BY m.trade_date) AS prev_close,
         ROW_NUMBER() OVER (PARTITION BY m.asset_id, m.trade_date ORDER BY m.id DESC) AS rn
-    FROM recent_bronze m
-    JOIN silver.dim_assets da ON m.asset_id = da.asset_id_bronze
+    FROM bronze.market_data m
+    WHERE m.trade_date >= (CURRENT_DATE - (:lookback_days * INTERVAL '1 day'))::DATE
 )
 INSERT INTO silver.fact_market_prices (
     asset_key, trade_date, open, high, low, close, adj_close, volume,
     daily_return, log_return, volume_usd, daily_range, gap_open, is_outlier
 )
 SELECT
-    asset_key, trade_date, open, high, low, close, adj_close, volume,
-    CASE WHEN prev_adj_close > 0 THEN ROUND((adj_close / prev_adj_close) - 1, 6) END AS daily_return,
-    CASE WHEN prev_adj_close > 0 AND adj_close > 0 THEN ROUND(LN(adj_close / prev_adj_close), 6) END AS log_return,
-    ROUND(adj_close * volume, 2) AS volume_usd,
-    CASE WHEN close > 0 THEN ROUND((high - low) / close, 6) END AS daily_range,
-    CASE WHEN prev_close > 0 THEN ROUND((open - prev_close) / prev_close, 6) END AS gap_open,
+    da.asset_key,
+    rb.trade_date,
+    rb.open, rb.high, rb.low, rb.close, rb.adj_close, rb.volume,
+    CASE WHEN rb.prev_adj_close > 0 THEN ROUND((rb.adj_close / rb.prev_adj_close) - 1, 6) END AS daily_return,
+    CASE WHEN rb.prev_adj_close > 0 AND rb.adj_close > 0 THEN ROUND(LN(rb.adj_close / rb.prev_adj_close), 6) END AS log_return,
+    ROUND(rb.adj_close * rb.volume, 2) AS volume_usd,
+    CASE WHEN rb.close > 0 THEN ROUND((rb.high - rb.low) / rb.close, 6) END AS daily_range,
+    CASE WHEN rb.prev_close > 0 THEN ROUND((rb.open - rb.prev_close) / rb.prev_close, 6) END AS gap_open,
     CASE 
-        WHEN adj_close <= 0 OR volume < 0 OR high < low THEN TRUE
-        WHEN open > high * 1.001 OR open < low * 0.999 THEN TRUE                
-        WHEN prev_adj_close > 0 AND ABS((adj_close / prev_adj_close) - 1) > 0.5 THEN TRUE
+        WHEN rb.adj_close <= 0 OR rb.volume < 0 OR rb.high < rb.low THEN TRUE
+        WHEN rb.open > rb.high * 1.001 OR rb.open < rb.low * 0.999 THEN TRUE                
+        WHEN rb.prev_adj_close > 0 AND ABS((rb.adj_close / rb.prev_adj_close) - 1) > 0.5 THEN TRUE
         ELSE FALSE
     END AS is_outlier
-FROM ranked_prices
-WHERE rn = 1
-  AND trade_date >= (CURRENT_DATE - (:target_days * INTERVAL '1 day'))::DATE
+FROM recent_bronze rb
+JOIN silver.dim_assets da ON rb.asset_id = da.asset_id_bronze
+WHERE rb.rn = 1
+  AND rb.trade_date >= (CURRENT_DATE - (:target_days * INTERVAL '1 day'))::DATE
 ON CONFLICT (asset_key, trade_date) DO UPDATE SET
     open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low, close = EXCLUDED.close,
     adj_close = EXCLUDED.adj_close, volume = EXCLUDED.volume, daily_return = EXCLUDED.daily_return,
     log_return = EXCLUDED.log_return, volume_usd = EXCLUDED.volume_usd, daily_range = EXCLUDED.daily_range,
     gap_open = EXCLUDED.gap_open, is_outlier = EXCLUDED.is_outlier;
 """
-
 
 # ----------------------------------------------------------
 # STEP 5: FACT_MACRO_VALUES
@@ -469,6 +466,7 @@ def run_silver_pipeline():
 
     try:
         with engine.connect() as conn:
+            conn.execute(text("SET statement_timeout = 300000;"))
 
             # STEP 1: DIM_DATE
             logger.info("[1/7] Generando calendario (silver.dim_date)...")
