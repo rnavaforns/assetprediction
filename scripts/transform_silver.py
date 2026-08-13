@@ -38,7 +38,14 @@ def get_db_engine():
     host = os.getenv("SUPABASE_DB_HOST")
     port = os.getenv("SUPABASE_DB_PORT")
     dbname = os.getenv("SUPABASE_DB_NAME")
-    return create_engine(f"postgresql://{user}:{password}@{host}:{port}/{dbname}")
+    
+    return create_engine(
+        f"postgresql://{user}:{password}@{host}:{port}/{dbname}",
+        connect_args={
+            "sslmode": "require",
+            "gssencmode": "disable"
+        }
+    )
 
 
 def log_transformation(connection, script_name, status, rows=0, error=None):
