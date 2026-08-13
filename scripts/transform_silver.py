@@ -215,7 +215,7 @@ SQL_FACT_MARKET_PRICES = """
 WITH recent_bronze AS (
     SELECT * 
     FROM bronze.market_data
-    WHERE trade_date >= (CURRENT_DATE - INTERVAL ':lookback_days days')
+    WHERE trade_date >= (CURRENT_DATE - (:lookback_days * INTERVAL '1 day'))::DATE
 ),
 ranked_prices AS (
     SELECT
@@ -247,7 +247,7 @@ SELECT
     END AS is_outlier
 FROM ranked_prices
 WHERE rn = 1
-  AND trade_date >= (CURRENT_DATE - INTERVAL ':target_days days')
+  AND trade_date >= (CURRENT_DATE - (:target_days * INTERVAL '1 day'))::DATE
 ON CONFLICT (asset_key, trade_date) DO UPDATE SET
     open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low, close = EXCLUDED.close,
     adj_close = EXCLUDED.adj_close, volume = EXCLUDED.volume, daily_return = EXCLUDED.daily_return,
@@ -265,7 +265,7 @@ SQL_FACT_MACRO_VALUES = """
 WITH recent_macro AS (
     SELECT *
     FROM bronze.macro_data
-    WHERE release_date >= (CURRENT_DATE - INTERVAL ':lookback_days days')
+    WHERE release_date >= (CURRENT_DATE - (:lookback_days * INTERVAL '1 day'))::DATE
 ),
 ranked_macro AS (
     SELECT
@@ -293,7 +293,7 @@ SELECT
     END AS transformed_value
 FROM ranked_macro
 WHERE rn = 1
-  AND release_date >= (CURRENT_DATE - INTERVAL ':target_days days')
+  AND release_date >= (CURRENT_DATE - (:target_days * INTERVAL '1 day'))::DATE
 ON CONFLICT (indicator_key, release_date) DO UPDATE SET
     reference_period = EXCLUDED.reference_period, value = EXCLUDED.value,
     reported_value_change = EXCLUDED.reported_value_change, transformed_value = EXCLUDED.transformed_value;
