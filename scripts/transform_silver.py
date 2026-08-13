@@ -212,7 +212,12 @@ ON CONFLICT (code) DO UPDATE SET
 # FIX W3: Outlier detection mejorada
 # ----------------------------------------------------------
 SQL_FACT_MARKET_PRICES = """
-WITH ranked_prices AS (
+WITH recent_bronze AS (
+    SELECT * 
+    FROM bronze.market_data
+    WHERE trade_date >= (CURRENT_DATE - INTERVAL ':lookback_days days')
+),
+ranked_prices AS (
     SELECT
         da.asset_key,
         m.trade_date,
@@ -220,7 +225,7 @@ WITH ranked_prices AS (
         LAG(m.adj_close) OVER (PARTITION BY m.asset_id ORDER BY m.trade_date) AS prev_adj_close,
         LAG(m.close) OVER (PARTITION BY m.asset_id ORDER BY m.trade_date) AS prev_close,
         ROW_NUMBER() OVER (PARTITION BY m.asset_id, m.trade_date ORDER BY m.id DESC) AS rn
-    FROM bronze.market_data m
+    FROM recent_bronze m
     JOIN silver.dim_assets da ON m.asset_id = da.asset_id_bronze
 )
 INSERT INTO silver.fact_market_prices (
@@ -228,66 +233,26 @@ INSERT INTO silver.fact_market_prices (
     daily_return, log_return, volume_usd, daily_range, gap_open, is_outlier
 )
 SELECT
-    asset_key,
-    trade_date,
-    open, high, low, close, adj_close, volume,
-
-    -- daily_return: (precio_hoy / precio_ayer) - 1
-    CASE
-        WHEN prev_adj_close IS NOT NULL AND prev_adj_close > 0
-        THEN ROUND((adj_close / prev_adj_close) - 1, 6)
-        ELSE NULL
-    END AS daily_return,
-
-    -- log_return: LN(precio_hoy / precio_ayer)
-    CASE
-        WHEN prev_adj_close IS NOT NULL AND prev_adj_close > 0 AND adj_close > 0
-        THEN ROUND(LN(adj_close / prev_adj_close), 6)
-        ELSE NULL
-    END AS log_return,
-
-    -- volume_usd: volumen en dólares (comparable entre activos)
+    asset_key, trade_date, open, high, low, close, adj_close, volume,
+    CASE WHEN prev_adj_close > 0 THEN ROUND((adj_close / prev_adj_close) - 1, 6) END AS daily_return,
+    CASE WHEN prev_adj_close > 0 AND adj_close > 0 THEN ROUND(LN(adj_close / prev_adj_close), 6) END AS log_return,
     ROUND(adj_close * volume, 2) AS volume_usd,
-
-    -- daily_range: proxy volatilidad intradía
-    CASE
-        WHEN close > 0
-        THEN ROUND((high - low) / close, 6)
-        ELSE NULL
-    END AS daily_range,
-
-    -- gap_open: impacto overnight (noticias fuera de horario)
-    CASE
-        WHEN prev_close IS NOT NULL AND prev_close > 0
-        THEN ROUND((open - prev_close) / prev_close, 6)
-        ELSE NULL
-    END AS gap_open,
-
-    -- is_outlier: FIX W3 — detección mejorada
-    CASE
-        WHEN adj_close <= 0 THEN TRUE                                           -- Precio negativo o cero
-        WHEN volume < 0 THEN TRUE                                               -- Volumen negativo
-        WHEN high < low THEN TRUE                                               -- Datos corruptos
-        WHEN open > high * 1.001 OR open < low * 0.999 THEN TRUE               -- Open fuera de rango H/L
-        WHEN prev_adj_close > 0 AND ABS((adj_close / prev_adj_close) - 1) > 0.5 THEN TRUE  -- Salto > 50%
+    CASE WHEN close > 0 THEN ROUND((high - low) / close, 6) END AS daily_range,
+    CASE WHEN prev_close > 0 THEN ROUND((open - prev_close) / prev_close, 6) END AS gap_open,
+    CASE 
+        WHEN adj_close <= 0 OR volume < 0 OR high < low THEN TRUE
+        WHEN open > high * 1.001 OR open < low * 0.999 THEN TRUE                
+        WHEN prev_adj_close > 0 AND ABS((adj_close / prev_adj_close) - 1) > 0.5 THEN TRUE
         ELSE FALSE
     END AS is_outlier
-
 FROM ranked_prices
 WHERE rn = 1
+  AND trade_date >= (CURRENT_DATE - INTERVAL ':target_days days')
 ON CONFLICT (asset_key, trade_date) DO UPDATE SET
-    open = EXCLUDED.open,
-    high = EXCLUDED.high,
-    low = EXCLUDED.low,
-    close = EXCLUDED.close,
-    adj_close = EXCLUDED.adj_close,
-    volume = EXCLUDED.volume,
-    daily_return = EXCLUDED.daily_return,
-    log_return = EXCLUDED.log_return,
-    volume_usd = EXCLUDED.volume_usd,
-    daily_range = EXCLUDED.daily_range,
-    gap_open = EXCLUDED.gap_open,
-    is_outlier = EXCLUDED.is_outlier;
+    open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low, close = EXCLUDED.close,
+    adj_close = EXCLUDED.adj_close, volume = EXCLUDED.volume, daily_return = EXCLUDED.daily_return,
+    log_return = EXCLUDED.log_return, volume_usd = EXCLUDED.volume_usd, daily_range = EXCLUDED.daily_range,
+    gap_open = EXCLUDED.gap_open, is_outlier = EXCLUDED.is_outlier;
 """
 
 
@@ -297,7 +262,12 @@ ON CONFLICT (asset_key, trade_date) DO UPDATE SET
 # NEW: transformed_value según is_rate_type
 # ----------------------------------------------------------
 SQL_FACT_MACRO_VALUES = """
-WITH ranked_macro AS (
+WITH recent_macro AS (
+    SELECT *
+    FROM bronze.macro_data
+    WHERE release_date >= (CURRENT_DATE - INTERVAL ':lookback_days days')
+),
+ranked_macro AS (
     SELECT
         dmi.indicator_key,
         dmi.is_rate_type,
@@ -307,7 +277,7 @@ WITH ranked_macro AS (
         md.value,
         LAG(md.value) OVER (PARTITION BY md.indicator_id ORDER BY md.release_date) AS prev_value,
         ROW_NUMBER() OVER (PARTITION BY md.indicator_id, md.release_date ORDER BY md.id DESC) AS rn
-    FROM bronze.macro_data md
+    FROM recent_macro md
     JOIN silver.dim_macro_indicators dmi ON md.indicator_id = dmi.indicator_id_bronze
 )
 INSERT INTO silver.fact_macro_values (
@@ -315,35 +285,18 @@ INSERT INTO silver.fact_macro_values (
     reported_value_change, transformed_value
 )
 SELECT
-    indicator_key,
-    release_date,
-    reference_period,
-    value,
-
-    -- FIX W1: NULL para primer registro (no COALESCE con 0)
+    indicator_key, release_date, reference_period, value,
+    CASE WHEN prev_value IS NOT NULL THEN ROUND(value - prev_value, 6) END AS reported_value_change,
     CASE
-        WHEN prev_value IS NULL THEN NULL
-        ELSE ROUND(value - prev_value, 6)
-    END AS reported_value_change,
-
-    -- NEW: transformed_value
-    CASE
-        -- Si ya es tasa (FEDFUNDS, UNRATE, DGS10, etc.): guardar tal cual
         WHEN is_rate_type = TRUE THEN ROUND(value, 6)
-        -- Si es nivel (CPIAUCSL, M2SL, INDPRO, etc.): calcular variación %
-        WHEN prev_value IS NOT NULL AND prev_value != 0
-        THEN ROUND((value / prev_value) - 1, 6)
-        -- Primer registro de indicador nivel: NULL
-        ELSE NULL
+        WHEN prev_value IS NOT NULL AND prev_value != 0 THEN ROUND((value / prev_value) - 1, 6)
     END AS transformed_value
-
 FROM ranked_macro
 WHERE rn = 1
+  AND release_date >= (CURRENT_DATE - INTERVAL ':target_days days')
 ON CONFLICT (indicator_key, release_date) DO UPDATE SET
-    reference_period = EXCLUDED.reference_period,
-    value = EXCLUDED.value,
-    reported_value_change = EXCLUDED.reported_value_change,
-    transformed_value = EXCLUDED.transformed_value;
+    reference_period = EXCLUDED.reference_period, value = EXCLUDED.value,
+    reported_value_change = EXCLUDED.reported_value_change, transformed_value = EXCLUDED.transformed_value;
 """
 
 
@@ -534,18 +487,18 @@ def run_silver_pipeline():
             logger.info(f"      {rows} indicadores sincronizados con unit + is_rate_type.")
 
             # STEP 4: FACT_MARKET_PRICES
-            logger.info("[4/7] Transformando precios de mercado (silver.fact_market_prices)...")
-            logger.info("      Calculando: daily_return, log_return, volume_usd, daily_range, gap_open, is_outlier")
-            res = conn.execute(text(SQL_FACT_MARKET_PRICES))
+            logger.info("[4/7] Transformando precios de mercado (Incremental)...")
+            # Parámetros: Miramos 15 días atrás, pero solo insertamos los últimos 7
+            res = conn.execute(text(SQL_FACT_MARKET_PRICES).bindparams(lookback_days=15, target_days=7))
             rows = res.rowcount or 0
             total_rows += rows
             conn.commit()
             logger.info(f"      {rows} filas procesadas.")
 
             # STEP 5: FACT_MACRO_VALUES
-            logger.info("[5/7] Transformando valores macro (silver.fact_macro_values)...")
-            logger.info("      Calculando: reported_value_change, transformed_value (nivel -> tasa)")
-            res = conn.execute(text(SQL_FACT_MACRO_VALUES))
+            logger.info("[5/7] Transformando valores macro (Incremental)...")
+            # Parámetros: Miramos 400 días atrás para asegurar el LAG trimestral, insertamos los últimos 30 días
+            res = conn.execute(text(SQL_FACT_MACRO_VALUES).bindparams(lookback_days=400, target_days=30))
             rows = res.rowcount or 0
             total_rows += rows
             conn.commit()
