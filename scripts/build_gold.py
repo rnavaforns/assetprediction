@@ -23,9 +23,11 @@ import argparse
 import logging
 from math import sqrt
 
+import urllib.parse
 import pandas as pd
 import numpy as np
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, event
+from sqlalchemy.pool import NullPool
 from dotenv import load_dotenv
 import csv
 from io import StringIO
@@ -58,16 +60,22 @@ def psql_insert_copy(table, conn, keys, data_iter):
 # ============================================================
 def get_db_engine():
     user = os.getenv("SUPABASE_DB_USER")
-    password = os.getenv("SUPABASE_DB_PASSWORD")
+    # Codificar la contraseña por si tiene caracteres especiales (@, #, /, etc.)
+    raw_password = os.getenv("SUPABASE_DB_PASSWORD", "")
+    password = urllib.parse.quote_plus(raw_password)
+    
     host = os.getenv("SUPABASE_DB_HOST")
-    port = os.getenv("SUPABASE_DB_PORT")
-    dbname = os.getenv("SUPABASE_DB_NAME")
+    port = os.getenv("SUPABASE_DB_PORT", "5432")
+    dbname = os.getenv("SUPABASE_DB_NAME", "postgres")
+    
+    # Construcción limpia del URI con SSL obligatorio en los parámetros de consulta
+    db_url = f"postgresql://{user}:{password}@{host}:{port}/{dbname}?sslmode=require"
     
     return create_engine(
-        f"postgresql://{user}:{password}@{host}:{port}/{dbname}",
+        db_url,
+        poolclass=NullPool,
         connect_args={
-            "client_encoding": "utf8",
-            "options": "-c statement_timeout=600000" # 10 minutos de margen
+            "connect_timeout": 10
         }
     )
 
