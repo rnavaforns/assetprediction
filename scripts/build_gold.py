@@ -27,12 +27,31 @@ import pandas as pd
 import numpy as np
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
+import csv
+from io import StringIO
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+def psql_insert_copy(table, conn, keys, data_iter):
+    """
+    Función de inserción rápida para PostgreSQL usando COPY.
+    """
+    dbapi_conn = conn.connection
+    with dbapi_conn.cursor() as cur:
+        s_buf = StringIO()
+        writer = csv.writer(s_buf)
+        writer.writerows(data_iter)
+        s_buf.seek(0)
+
+        columns = ', '.join(f'"{k}"' for k in keys)
+        schema = f'"{table.schema}".' if table.schema else ''
+        table_name = f'{schema}"{table.name}"'
+
+        sql = f'COPY {table_name} ({columns}) FROM STDIN WITH CSV'
+        cur.copy_expert(sql=sql, file=s_buf)
 
 # ============================================================
 # CONFIGURACIÓN
@@ -381,10 +400,11 @@ def write_to_gold(df, engine):
                 schema='gold',
                 if_exists='append',
                 index=False,
-                method='multi',
-                chunksize=5000
+                # Usamos nuestra función COPY en lugar de 'multi'
+                method=psql_insert_copy
+                chunksize=10000
             )
-        logger.info(f"      {len(df_out):,} filas insertadas de manera atómica.")
+        logger.info(f"      {len(df_out):,} filas insertadas de manera atómica (COPY).")
     except Exception as e:
         logger.error("Error transaccional al escribir en la BDD. Se ha hecho rollback.", exc_info=True)
         raise e
