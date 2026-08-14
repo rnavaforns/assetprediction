@@ -96,7 +96,7 @@ def get_db_engine():
             "keepalives_idle": 30,
             "keepalives_interval": 10,
             "keepalives_count": 5,
-            "options": "-c client_encoding=UTF8" # Forzar codificación en handshake
+            "options": "-c client_encoding=UTF8 -c prepare_threshold=0" # Forzar codificación en handshake
         }
     )
 
