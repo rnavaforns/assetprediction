@@ -11,6 +11,7 @@ on:
 jobs:
   ingest_and_train:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
 
     steps:
     # 1. Clonar el repositorio en la máquina virtual
