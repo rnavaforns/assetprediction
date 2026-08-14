@@ -41,47 +41,47 @@ jobs:
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
     # 5. Ejecutar el Pipeline de Mercado (Yahoo Finance)
-    - name: Run Market Ingestion
-      env:
-        SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
-        SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
-        SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
-        SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
-        SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
-      run: python scripts/ingesta_market.py
+    # - name: Run Market Ingestion
+    #   env:
+    #     SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+    #     SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+    #     SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
+    #     SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
+    #     SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+    #   run: python scripts/ingesta_market.py
 
-    # 6. Ejecutar el Pipeline Macroeconómico (FRED API)
-    - name: Run Macro Ingestion
-      env:
-        SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
-        SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
-        SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
-        SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
-        SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
-        FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-      run: python scripts/ingesta_macro.py
+    # # 6. Ejecutar el Pipeline Macroeconómico (FRED API)
+    # - name: Run Macro Ingestion
+    #   env:
+    #     SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+    #     SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+    #     SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
+    #     SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
+    #     SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+    #     FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+    #   run: python scripts/ingesta_macro.py
 
-    # 7. Ejecutar el Pipeline de Sentimiento (FinBERT)
-    - name: Run Sentiment Ingestion
-      env:
-        SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
-        SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
-        SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
-        SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
-        SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
-        FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
-      run: python scripts/ingesta_sentiment.py
+    # # 7. Ejecutar el Pipeline de Sentimiento (FinBERT)
+    # - name: Run Sentiment Ingestion
+    #   env:
+    #     SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+    #     SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+    #     SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
+    #     SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
+    #     SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+    #     FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+    #   run: python scripts/ingesta_sentiment.py
       
-    # 8. Transformación Bronze -> Silver
-    - name: Transformación Bronze -> Silver
-      env:
-        SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
-        SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
-        SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
-        SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
-        SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
-        FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
-      run: python scripts/transform_silver.py
+    # # 8. Transformación Bronze -> Silver
+    # - name: Transformación Bronze -> Silver
+    #   env:
+    #     SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+    #     SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+    #     SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
+    #     SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
+    #     SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+    #     FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+    #   run: python scripts/transform_silver.py
 
     # 9. Transformación Silver -> Gold
     - name: Transformación Silver -> Gold
