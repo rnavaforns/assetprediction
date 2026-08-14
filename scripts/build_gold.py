@@ -13,7 +13,6 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, text, bindparam
 from sqlalchemy.pool import NullPool
 from sqlalchemy.exc import OperationalError, DatabaseError
-
 # ============================================================
 # CONFIGURACIÓN
 # ============================================================
@@ -29,7 +28,6 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
 # ============================================================
 # CONSTANTES
 # ============================================================
@@ -37,7 +35,6 @@ DEFAULT_READ_CHUNK_SIZE = 10000
 DEFAULT_ASSET_BATCH_SIZE = 1
 DEFAULT_STATEMENT_TIMEOUT = "900s"
 WARMUP_DAYS = 252
-
 # Mapeo: código FRED → nombre columna en Gold
 MACRO_COLUMN_MAP = {
     'FEDFUNDS':   'fed_funds_rate',
@@ -54,7 +51,6 @@ MACRO_COLUMN_MAP = {
     'DCOILWTICO': 'oil_transformed',
     'VIXCLS':     'vix',
 }
-
 GOLD_COLUMNS = [
     'asset_key', 'ticker', 'trade_date',
     'asset_class', 'region', 'sector',
@@ -82,7 +78,6 @@ GOLD_COLUMNS = [
     'forward_return_5d',
     'is_outlier',
 ]
-
 # ============================================================
 # DECORADOR DE REINTENTOS
 # ============================================================
@@ -119,7 +114,6 @@ def retry_db_call(max_retries=5, delay=3, backoff=2):
                     raise
         return wrapper
     return decorator
-
 # ============================================================
 # ENGINE
 # ============================================================
@@ -166,15 +160,12 @@ def get_db_engine():
         },
     )
     return engine
-
 # ============================================================
 # COPY
 # ============================================================
 def psql_insert_copy(table, conn, keys, data_iter):
     """
     Inserción rápida utilizando PostgreSQL COPY.
-    IMPORTANTE:
-    data_iter se consume una sola vez.
     """
     dbapi_conn = conn.connection
     with dbapi_conn.cursor() as cur:
@@ -183,7 +174,15 @@ def psql_insert_copy(table, conn, keys, data_iter):
             buffer,
             quoting=csv.QUOTE_MINIMAL
         )
-        writer.writerows(data_iter)
+        for row in data_iter:
+            clean_row = []
+            for value in row:
+                # NULL de pandas/numpy -> None.
+                if pd.isna(value):
+                    clean_row.append(None)
+                else:
+                    clean_row.append(value)
+            writer.writerow(clean_row)
         buffer.seek(0)
         columns = ", ".join(
             f'"{key}"'
@@ -205,7 +204,6 @@ def psql_insert_copy(table, conn, keys, data_iter):
             sql=sql,
             file=buffer
         )
-
 # ============================================================
 # CONFIGURACIÓN DE SESIÓN
 # ============================================================
@@ -225,7 +223,6 @@ def configure_connection(conn):
             "SET idle_in_transaction_session_timeout = '900s'"
         )
     )
-
 # ============================================================
 # STEP 1 — LEER ACTIVOS
 # ============================================================
@@ -254,7 +251,6 @@ def read_assets(engine):
         f"      {len(df):,} activos encontrados."
     )
     return df
-
 # ============================================================
 # STEP 2 — LEER MARKET POR BLOQUE DE ACTIVOS
 # ============================================================
@@ -360,7 +356,6 @@ def read_market_data_for_assets(
         f"      Market leído: {len(df):,} filas."
     )
     return df
-
 # ============================================================
 # STEP 3 — LEER MACRO
 # ============================================================
@@ -396,7 +391,6 @@ def read_macro_data(engine):
         f"      {len(df):,} registros macro."
     )
     return df
-
 # ============================================================
 # STEP 4 — LEER SENTIMENT POR BLOQUE
 # ============================================================
@@ -481,7 +475,6 @@ def read_sentiment_data_for_assets(
         f"      Sentiment leído: {len(df):,} registros."
     )
     return df
-
 # ============================================================
 # STEP 5 — PREPARAR MACRO
 # ============================================================
@@ -516,7 +509,6 @@ def prepare_macro(df_macro):
         'release_date'
     )
     return macro
-
 # ============================================================
 # STEP 6 — MERGE MARKET + MACRO
 # ============================================================
@@ -559,7 +551,6 @@ def merge_macro_into_market(
         ['ticker', 'trade_date']
     ).reset_index(drop=True)
     return result
-
 # ============================================================
 # STEP 7 — MERGE SENTIMENT
 # ============================================================
@@ -595,7 +586,6 @@ def merge_sentiment(
         'sentiment_weighted'
     ] = np.nan
     return df
-
 # ============================================================
 # STEP 8 — SENTIMENT EMA
 # ============================================================
@@ -638,7 +628,6 @@ def calculate_sentiment_ema(df):
         ]
     ] = np.nan
     return df
-
 # ============================================================
 # STEP 9 — INDICADORES TÉCNICOS
 # ============================================================
@@ -981,7 +970,6 @@ def calculate_technical_indicators(df):
         f"{len(df_out):,}"
     )
     return df_out
-
 # ============================================================
 # STEP 10 — TARGET
 # ============================================================
@@ -1026,7 +1014,6 @@ def calculate_target(
         f"      {n_nulls:,} filas sin target."
     )
     return df
-
 # ============================================================
 # STEP 11 — VALIDAR DATAFRAME
 # ============================================================
@@ -1041,11 +1028,56 @@ def prepare_for_gold(df):
             "Faltan columnas para Gold: "
             + ", ".join(missing)
         )
-    df_out = df[
-        GOLD_COLUMNS
-    ].copy()
+    df_out = df[GOLD_COLUMNS].copy()
+    # ========================================================
+    # NORMALIZACIÓN DE TIPOS PARA POSTGRESQL
+    # ========================================================
+    # article_count es INTEGER en PostgreSQL.
+    # El merge con sentimiento introduce NaN y pandas lo
+    # convierte a float -> 1.0, 2.0, ...
+    # COPY de PostgreSQL no acepta "1.0" para INTEGER.
+    if 'article_count' in df_out.columns:
+        article_count = pd.to_numeric(
+            df_out['article_count'],
+            errors='coerce'
+        )
+        # Los counts deben ser enteros.
+        # Si hubiera algún valor no entero, fallamos explícitamente.
+        non_integer = (
+            article_count.notna()
+            &
+            (
+                article_count
+                !=
+                article_count.round()
+            )
+        )
+        if non_integer.any():
+            invalid_values = (
+                article_count[non_integer]
+                .unique()
+                .tolist()
+            )
+            raise ValueError(
+                "article_count contiene valores no enteros: "
+                f"{invalid_values[:10]}"
+            )
+        # Convertimos a entero nullable de pandas.
+        article_count = (
+            article_count
+            .round()
+            .astype('Int64')
+        )
+        # Convertimos pd.NA -> None para que COPY genere NULL.
+        df_out['article_count'] = (
+            article_count
+            .astype(object)
+            .where(
+                article_count.notna(),
+                None
+            )
+        )
     return df_out
-
 # ============================================================
 # STEP 12 — TRUNCATE GOLD
 # ============================================================
@@ -1065,7 +1097,6 @@ def truncate_gold(engine):
     logger.info(
         "      Gold vaciado correctamente."
     )
-
 # ============================================================
 # STEP 13 — INSERTAR UN BLOQUE
 # ============================================================
@@ -1111,7 +1142,6 @@ def write_gold_chunk(
         f"insertado."
     )
     return len(df)
-
 # ============================================================
 # STEP 14 — VERIFICACIÓN GOLD
 # ============================================================
@@ -1168,7 +1198,6 @@ def verify_gold(engine):
     logger.info(
         "=" * 70
     )
-
 # ============================================================
 # LOG DE TRANSFORMACIÓN
 # ============================================================
@@ -1213,7 +1242,6 @@ def _try_log_transformation(
                 "e": error
             }
         )
-
 def log_transformation(
     engine,
     script_name,
@@ -1234,7 +1262,6 @@ def log_transformation(
             "Error guardando log "
             f"(no bloqueante): {e}"
         )
-
 # ============================================================
 # PROCESAR UN BLOQUE DE ACTIVOS
 # ============================================================
@@ -1354,7 +1381,6 @@ def process_asset_batch(
         f"{rows:,} filas."
     )
     return rows
-
 # ============================================================
 # MAIN
 # ============================================================
@@ -1586,7 +1612,6 @@ def main():
                 engine.dispose()
             except Exception:
                 pass
-
 # ============================================================
 # ENTRYPOINT
 # ============================================================
