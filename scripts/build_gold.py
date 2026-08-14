@@ -26,10 +26,6 @@ logger = logging.getLogger(__name__)
 # DECORADOR DE REINTENTOS PARA BASE DE DATOS
 # ============================================================
 def retry_db_call(max_retries=3, delay=3, backoff=2):
-    """
-    Decorador que reintenta funciones que interactúan con la BDD 
-    ante fallos temporales de red u OperationalError.
-    """
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -37,18 +33,17 @@ def retry_db_call(max_retries=3, delay=3, backoff=2):
             for attempt in range(1, max_retries + 1):
                 try:
                     return func(*args, **kwargs)
-                except OperationalError as e:
+                except (OperationalError, DatabaseError) as e:
                     if attempt == max_retries:
-                        logger.error(f"❌ Falló '{func.__name__}' tras {max_retries} intentos por error de conexión.")
+                        logger.error(f"❌ Falló '{func.__name__}' tras {max_retries} intentos por error de conexión u operación.")
                         raise e
                     logger.warning(
-                        f"⚠️ Error de conexión en '{func.__name__}' (Intento {attempt}/{max_retries}): {e}. "
+                        f"⚠️ Error en '{func.__name__}' (Intento {attempt}/{max_retries}): {e}. "
                         f"Reintentando en {current_delay}s..."
                     )
                     time.sleep(current_delay)
                     current_delay *= backoff
                 except Exception as e:
-                    # Si no es un error de conexión/operacional, elevar la excepción inmediatamente
                     raise e
         return wrapper
     return decorator
@@ -91,12 +86,13 @@ def get_db_engine():
         db_url,
         poolclass=NullPool,
         connect_args={
-            "connect_timeout": 30,             # Ampliado a 30s
-            "keepalives": 1,                   # Activar TCP Keep-Alive
+            "connect_timeout": 30,
+            "keepalives": 1,
             "keepalives_idle": 30,
             "keepalives_interval": 10,
             "keepalives_count": 5,
-            "options": "-c client_encoding=UTF8 -c prepare_threshold=0" # Forzar codificación en handshake
+            # Añadido statement_timeout=900000 ms (15 min) a las opciones por defecto
+            "options": "-c client_encoding=UTF8 -c prepare_threshold=0 -c statement_timeout=900000"
         }
     )
 
