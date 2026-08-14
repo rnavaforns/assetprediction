@@ -73,27 +73,13 @@ def psql_insert_copy(table, conn, keys, data_iter):
 # ============================================================
 def get_db_engine():
     user = os.getenv("SUPABASE_DB_USER")
-    raw_password = os.getenv("SUPABASE_DB_PASSWORD", "")
-    password = urllib.parse.quote_plus(raw_password)
-    
+    password = os.getenv("SUPABASE_DB_PASSWORD")
     host = os.getenv("SUPABASE_DB_HOST")
-    port = os.getenv("SUPABASE_DB_PORT", "5432")
-    dbname = os.getenv("SUPABASE_DB_NAME", "postgres")
-    
-    db_url = f"postgresql://{user}:{password}@{host}:{port}/{dbname}?sslmode=require"
-    
+    port = os.getenv("SUPABASE_DB_PORT")
+    dbname = os.getenv("SUPABASE_DB_NAME")
+
     return create_engine(
-        db_url,
-        poolclass=NullPool,
-        connect_args={
-            "connect_timeout": 30,
-            "keepalives": 1,
-            "keepalives_idle": 30,
-            "keepalives_interval": 10,
-            "keepalives_count": 5,
-            # Añadido statement_timeout=900000 ms (15 min) a las opciones por defecto
-            "options": "-c statement_timeout=900000"
-        }
+        f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
     )
 
 
