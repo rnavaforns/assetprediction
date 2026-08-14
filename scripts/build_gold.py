@@ -1,33 +1,17 @@
-# ============================================================
-# CAPA GOLD: build_gold.py
-# ============================================================
-# Lee las tablas Silver, calcula los indicadores técnicos,
-# pivota y forward-fills la macro, y escribe la tabla única
-# gold.training_dataset lista para consumo ML.
-
-# Prerrequisitos:
-#     pip install sqlalchemy psycopg2-binary pandas pandas-ta python-dotenv
-
-# Uso:
-#     python build_gold.py
-#     python build_gold.py --horizon 5
-
-# Frecuencia:
-#     Ejecutar después de transform_silver.py
-# ============================================================
-# """
-
 import os
 import sys
 import argparse
 import logging
+import time
 from math import sqrt
+from functools import wraps
 
 import urllib.parse
 import pandas as pd
 import numpy as np
-from sqlalchemy import create_engine, text, event
+from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
+from sqlalchemy.exc import OperationalError
 from dotenv import load_dotenv
 import csv
 from io import StringIO
@@ -36,6 +20,39 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# DECORADOR DE REINTENTOS PARA BASE DE DATOS
+# ============================================================
+def retry_db_call(max_retries=3, delay=3, backoff=2):
+    """
+    Decorador que reintenta funciones que interactúan con la BDD 
+    ante fallos temporales de red u OperationalError.
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            current_delay = delay
+            for attempt in range(1, max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except OperationalError as e:
+                    if attempt == max_retries:
+                        logger.error(f"❌ Falló '{func.__name__}' tras {max_retries} intentos por error de conexión.")
+                        raise e
+                    logger.warning(
+                        f"⚠️ Error de conexión en '{func.__name__}' (Intento {attempt}/{max_retries}): {e}. "
+                        f"Reintentando en {current_delay}s..."
+                    )
+                    time.sleep(current_delay)
+                    current_delay *= backoff
+                except Exception as e:
+                    # Si no es un error de conexión/operacional, elevar la excepción inmediatamente
+                    raise e
+        return wrapper
+    return decorator
+
 
 def psql_insert_copy(table, conn, keys, data_iter):
     """
@@ -55,12 +72,12 @@ def psql_insert_copy(table, conn, keys, data_iter):
         sql = f'COPY {table_name} ({columns}) FROM STDIN WITH CSV'
         cur.copy_expert(sql=sql, file=s_buf)
 
+
 # ============================================================
 # CONFIGURACIÓN
 # ============================================================
 def get_db_engine():
     user = os.getenv("SUPABASE_DB_USER")
-    # Codificar la contraseña por si tiene caracteres especiales (@, #, /, etc.)
     raw_password = os.getenv("SUPABASE_DB_PASSWORD", "")
     password = urllib.parse.quote_plus(raw_password)
     
@@ -68,14 +85,18 @@ def get_db_engine():
     port = os.getenv("SUPABASE_DB_PORT", "5432")
     dbname = os.getenv("SUPABASE_DB_NAME", "postgres")
     
-    # Construcción limpia del URI con SSL obligatorio en los parámetros de consulta
     db_url = f"postgresql://{user}:{password}@{host}:{port}/{dbname}?sslmode=require"
     
     return create_engine(
         db_url,
         poolclass=NullPool,
         connect_args={
-            "connect_timeout": 10
+            "connect_timeout": 30,             # Ampliado a 30s
+            "keepalives": 1,                   # Activar TCP Keep-Alive
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 5,
+            "options": "-c client_encoding=UTF8" # Forzar codificación en handshake
         }
     )
 
@@ -99,13 +120,13 @@ MACRO_COLUMN_MAP = {
 
 
 # ============================================================
-# STEP 1: LEER DATOS DE SILVER
+# STEP 1: LEER DATOS DE SILVER (CON REINTENTOS)
 # ============================================================
+@retry_db_call(max_retries=3, delay=3, backoff=2)
 def read_market_data(engine):
     """Lee fact_market_prices JOIN dim_assets (desnormaliza metadata + 19 flags)."""
     logger.info("[1/7] Leyendo datos de mercado + metadata de activos...")
 
-    # Hemos quitado el ORDER BY del final
     query = """
     SELECT
         fmp.asset_key,
@@ -126,10 +147,7 @@ def read_market_data(engine):
     JOIN silver.dim_assets da ON fmp.asset_key = da.asset_key
     """
     
-    # 1. Leer los datos tal cual vienen (streaming más rápido)
     df = pd.read_sql(query, engine, parse_dates=['trade_date'])
-    
-    # 2. Ordenar usando el motor C optimizado de Pandas
     df = df.sort_values(by=['ticker', 'trade_date']).reset_index(drop=True)
     
     logger.info(f"      {len(df):,} filas × {len(df.columns)} columnas "
@@ -137,8 +155,8 @@ def read_market_data(engine):
     return df
 
 
+@retry_db_call(max_retries=3, delay=3, backoff=2)
 def read_macro_data(engine):
-    # 1. Quitamos el ORDER BY de la query SQL
     query = """
         SELECT
             dmi.code,
@@ -150,22 +168,19 @@ def read_macro_data(engine):
         JOIN silver.dim_macro_indicators dmi ON fmv.indicator_key = dmi.indicator_key
     """
     
-    # 2. Abrimos conexión explícita y ampliamos el statement_timeout a 15 minutos para esta consulta
     with engine.connect() as conn:
         conn.execute(text("SET statement_timeout = '900s';"))
         df = pd.read_sql(text(query), conn, parse_dates=['release_date'])
     
-    # 3. Ordenamos en memoria con Pandas (tarda milisegundos)
     df = df.sort_values(by=['code', 'release_date']).reset_index(drop=True)
-    
     return df
 
 
+@retry_db_call(max_retries=3, delay=3, backoff=2)
 def read_sentiment_data(engine):
     """Lee fact_sentiment incluyendo las nuevas métricas desglosadas."""
     logger.info("[3/7] Leyendo datos de sentimiento...")
 
-    # Quitamos el ORDER BY
     query = """
     SELECT
         fs.asset_key,
@@ -179,14 +194,11 @@ def read_sentiment_data(engine):
     FROM silver.fact_sentiment fs
     """
     
-    # Aplicamos el aumento de timeout temporal por seguridad
     with engine.connect() as conn:
         conn.execute(text("SET statement_timeout = '900s';"))
         df = pd.read_sql(text(query), conn, parse_dates=['trade_date'])
         
-    # Ordenamos en memoria
     df = df.sort_values(by=['asset_key', 'trade_date']).reset_index(drop=True)
-    
     logger.info(f"      {len(df):,} registros de sentimiento")
     return df
 
@@ -195,10 +207,6 @@ def read_sentiment_data(engine):
 # STEP 2: PIVOT Y FORWARD-FILL DE MACRO
 # ============================================================
 def pivot_and_forwardfill_macro(df_market, df_macro):
-    """
-    Pivota los 13 indicadores macro de vertical a horizontal (1 columna por indicador)
-    y hace forward-fill al calendario diario de mercado.
-    """
     logger.info("[4/7] Pivotando macro a formato ancho + forward-fill...")
 
     trading_dates = df_market['trade_date'].drop_duplicates().sort_values().reset_index(drop=True)
@@ -237,7 +245,6 @@ def pivot_and_forwardfill_macro(df_market, df_macro):
 # STEP 3: MERGE DE TODAS LAS FUENTES
 # ============================================================
 def merge_all(df_market, df_macro_daily, df_sentiment):
-    """Une market + macro + sentimiento en un único DataFrame."""
     logger.info("[5/7] Uniendo market + macro + sentimiento...")
 
     df = df_market.merge(df_macro_daily, on='trade_date', how='left')
@@ -248,8 +255,6 @@ def merge_all(df_market, df_macro_daily, df_sentiment):
             on=['asset_key', 'trade_date'],
             how='left'
         )
-        
-        pass 
     else:
         df['sentiment_score'] = np.nan
         df['sentiment_pos'] = np.nan
@@ -266,13 +271,26 @@ def merge_all(df_market, df_macro_daily, df_sentiment):
     return df
 
 
+def calculate_sentiment_ema(df):
+    logger.info("Calculando EMAs de sentimiento...")
+    df = df.sort_values(['ticker', 'trade_date'])
+    
+    df['sentiment_ema_3'] = df.groupby('ticker')['sentiment_score'].transform(
+        lambda x: x.ewm(span=3, adjust=False, min_periods=1).mean()
+    )
+    
+    df['sentiment_ema_5'] = df.groupby('ticker')['sentiment_score'].transform(
+        lambda x: x.ewm(span=5, adjust=False, min_periods=1).mean()
+    )
+    
+    df.loc[df['sentiment_score'].isna(), ['sentiment_ema_3', 'sentiment_ema_5']] = np.nan
+    return df
+
+
 # ============================================================
 # STEP 4: INDICADORES TÉCNICOS
 # ============================================================
 def calculate_technical_indicators(df):
-    """
-    Calcula los 18 indicadores técnicos por activo usando pandas-ta.
-    """
     logger.info("[6/7] Calculando indicadores técnicos (SMA, RSI, MACD, Bollinger, ATR)...")
 
     try:
@@ -358,9 +376,7 @@ def calculate_technical_indicators(df):
 
     df_out = pd.concat(results, ignore_index=True)
     
-    # Warm-up estricto. Eliminamos los primeros 252 registros
     logger.info("      Aplicando periodo de warm-up (descartando primeros 252 días por activo)...")
-    
     df_out['row_num'] = df_out.groupby('ticker').cumcount()
     df_out = df_out[df_out['row_num'] >= 252].drop(columns=['row_num']).reset_index(drop=True)
 
@@ -372,9 +388,6 @@ def calculate_technical_indicators(df):
 # STEP 5: TARGET Y CONTROL
 # ============================================================
 def calculate_target(df, horizon=5):
-    """
-    Calcula la variable objetivo: retorno futuro a N días.
-    """
     logger.info(f"[7/7] Calculando target (forward_return_{horizon}d)...")
 
     df = df.sort_values(['ticker', 'trade_date'])
@@ -388,8 +401,9 @@ def calculate_target(df, horizon=5):
 
 
 # ============================================================
-# STEP FINAL: ESCRIBIR A GOLD
+# STEP FINAL: ESCRIBIR A GOLD (CON REINTENTOS)
 # ============================================================
+@retry_db_call(max_retries=3, delay=3, backoff=2)
 def write_to_gold(df, engine):
     """Escribe el DataFrame final a gold.training_dataset."""
     logger.info("Escribiendo a gold.training_dataset...")
@@ -433,7 +447,6 @@ def write_to_gold(df, engine):
                 schema='gold',
                 if_exists='append',
                 index=False,
-                # Usamos nuestra función COPY en lugar de 'multi'
                 method=psql_insert_copy,
                 chunksize=10000
             )
@@ -466,39 +479,23 @@ def write_to_gold(df, engine):
 
 
 # ============================================================
-# LOG
+# LOG (CON REINTENTO Y NO BLOQUEANTE)
 # ============================================================
+@retry_db_call(max_retries=2, delay=2, backoff=2)
+def _try_log_transformation(engine, script_name, status, rows, error):
+    with engine.connect() as conn:
+        conn.execute(text("""
+            INSERT INTO bronze.ingestion_logs (script_name, status, rows_inserted, error_message)
+            VALUES (:s, :st, :r, :e)
+        """), {"s": script_name, "st": status, "r": rows, "e": error})
+        conn.commit()
+
 def log_transformation(engine, script_name, status, rows=0, error=None):
     try:
-        with engine.connect() as conn:
-            conn.execute(text("""
-                INSERT INTO bronze.ingestion_logs (script_name, status, rows_inserted, error_message)
-                VALUES (:s, :st, :r, :e)
-            """), {"s": script_name, "st": status, "r": rows, "e": error})
-            conn.commit()
+        _try_log_transformation(engine, script_name, status, rows, error)
     except Exception as e:
-        logger.error(f"Error guardando log: {e}")
+        logger.error(f"Error guardando log tras reintentos (no bloqueante): {e}")
 
-def calculate_sentiment_ema(df):
-    """Calcula la Media Móvil Exponencial del sentimiento por activo."""
-    logger.info("Calculando EMAs de sentimiento...")
-    
-    # 1. Aseguramos el orden correcto (crítico para rolling/ewm)
-    df = df.sort_values(['ticker', 'trade_date'])
-    
-    # 2. Vectorizamos la EMA usando groupby + transform sin bucles for
-    df['sentiment_ema_3'] = df.groupby('ticker')['sentiment_score'].transform(
-        lambda x: x.ewm(span=3, adjust=False, min_periods=1).mean()
-    )
-    
-    df['sentiment_ema_5'] = df.groupby('ticker')['sentiment_score'].transform(
-        lambda x: x.ewm(span=5, adjust=False, min_periods=1).mean()
-    )
-    
-    # 3. Mantenemos el comportamiento original para los NaN
-    df.loc[df['sentiment_score'].isna(), ['sentiment_ema_3', 'sentiment_ema_5']] = np.nan
-    
-    return df
 
 # ============================================================
 # PIPELINE PRINCIPAL
