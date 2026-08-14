@@ -138,22 +138,26 @@ def read_market_data(engine):
 
 
 def read_macro_data(engine):
-    """Lee fact_macro_values con el código del indicador para pivot."""
-    logger.info("[2/7] Leyendo datos macroeconómicos...")
-
+    # 1. Quitamos el ORDER BY de la query SQL
     query = """
-    SELECT
-        dmi.code,
-        dmi.is_rate_type,
-        fmv.release_date,
-        fmv.value,
-        fmv.transformed_value
-    FROM silver.fact_macro_values fmv
-    JOIN silver.dim_macro_indicators dmi ON fmv.indicator_key = dmi.indicator_key
-    ORDER BY dmi.code, fmv.release_date
+        SELECT
+            dmi.code,
+            dmi.is_rate_type,
+            fmv.release_date,
+            fmv.value,
+            fmv.transformed_value
+        FROM silver.fact_macro_values fmv
+        JOIN silver.dim_macro_indicators dmi ON fmv.indicator_key = dmi.indicator_key
     """
-    df = pd.read_sql(query, engine, parse_dates=['release_date'])
-    logger.info(f"      {len(df):,} registros macro, {df['code'].nunique()} indicadores")
+    
+    # 2. Abrimos conexión explícita y ampliamos el statement_timeout a 15 minutos para esta consulta
+    with engine.connect() as conn:
+        conn.execute(text("SET statement_timeout = '900s';"))
+        df = pd.read_sql(text(query), conn, parse_dates=['release_date'])
+    
+    # 3. Ordenamos en memoria con Pandas (tarda milisegundos)
+    df = df.sort_values(by=['code', 'release_date']).reset_index(drop=True)
+    
     return df
 
 
@@ -161,6 +165,7 @@ def read_sentiment_data(engine):
     """Lee fact_sentiment incluyendo las nuevas métricas desglosadas."""
     logger.info("[3/7] Leyendo datos de sentimiento...")
 
+    # Quitamos el ORDER BY
     query = """
     SELECT
         fs.asset_key,
@@ -172,9 +177,16 @@ def read_sentiment_data(engine):
         fs.sentiment_std,
         fs.article_count
     FROM silver.fact_sentiment fs
-    ORDER BY fs.asset_key, fs.publish_date
     """
-    df = pd.read_sql(query, engine, parse_dates=['trade_date'])
+    
+    # Aplicamos el aumento de timeout temporal por seguridad
+    with engine.connect() as conn:
+        conn.execute(text("SET statement_timeout = '900s';"))
+        df = pd.read_sql(text(query), conn, parse_dates=['trade_date'])
+        
+    # Ordenamos en memoria
+    df = df.sort_values(by=['asset_key', 'trade_date']).reset_index(drop=True)
+    
     logger.info(f"      {len(df):,} registros de sentimiento")
     return df
 
@@ -471,23 +483,22 @@ def calculate_sentiment_ema(df):
     """Calcula la Media Móvil Exponencial del sentimiento por activo."""
     logger.info("Calculando EMAs de sentimiento...")
     
-    results = []
-    for ticker, group in df.groupby('ticker'):
-        g = group.sort_values('trade_date').copy()
-        
-        # Calculamos la EMA ignorando los NaN (min_periods=1 para que empiece a calcular cuanto antes)
-        # span=3 y span=5 corresponden a las ventanas temporales
-        g['sentiment_ema_3'] = g['sentiment_score'].ewm(span=3, adjust=False, min_periods=1).mean()
-        g['sentiment_ema_5'] = g['sentiment_score'].ewm(span=5, adjust=False, min_periods=1).mean()
-        
-        # Si un día no hay noticia (era NaN originalmente), podemos decidir si la EMA decae 
-        # o si mantenemos el NaN. Lo más limpio para XGBoost es que si no hay rastro, mantenga NaN
-        # o arrastre la inercia. Dejaremos que pandas haga el ewm y aseguramos los NaN donde no había datos base:
-        g.loc[g['sentiment_score'].isna(), ['sentiment_ema_3', 'sentiment_ema_5']] = np.nan
-        
-        results.append(g)
-        
-    return pd.concat(results, ignore_index=True)
+    # 1. Aseguramos el orden correcto (crítico para rolling/ewm)
+    df = df.sort_values(['ticker', 'trade_date'])
+    
+    # 2. Vectorizamos la EMA usando groupby + transform sin bucles for
+    df['sentiment_ema_3'] = df.groupby('ticker')['sentiment_score'].transform(
+        lambda x: x.ewm(span=3, adjust=False, min_periods=1).mean()
+    )
+    
+    df['sentiment_ema_5'] = df.groupby('ticker')['sentiment_score'].transform(
+        lambda x: x.ewm(span=5, adjust=False, min_periods=1).mean()
+    )
+    
+    # 3. Mantenemos el comportamiento original para los NaN
+    df.loc[df['sentiment_score'].isna(), ['sentiment_ema_3', 'sentiment_ema_5']] = np.nan
+    
+    return df
 
 # ============================================================
 # PIPELINE PRINCIPAL

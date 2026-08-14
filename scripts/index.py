@@ -16,41 +16,15 @@ def get_db_engine():
 def run_db_optimizations():
     engine = get_db_engine()
     
-    # Sentencias DDL de creación de índices y análisis de estadísticas
+    # Sentencias DDL de creación de índices
     statements = [
         (
-            "Índice compuesto en bronze.market_data",
+            "Índice compuesto en silver.fact_macro_values (indicator_key, release_date)",
             """
-            CREATE INDEX IF NOT EXISTS idx_bronze_market_data_asset_date 
-            ON bronze.market_data (trade_date, asset_id);
-            """
-        ),
-        (
-            "Índice en dimensión silver.dim_assets",
-            """
-            CREATE INDEX IF NOT EXISTS idx_dim_assets_bronze_id 
-            ON silver.dim_assets (asset_id_bronze);
+            CREATE INDEX IF NOT EXISTS idx_fact_macro_values_lookup 
+            ON silver.fact_macro_values (indicator_key, release_date);
             """
         ),
-        (
-            "Índice único en silver.fact_market_prices",
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS uq_fact_market_prices_asset_date 
-            ON silver.fact_market_prices (asset_key, trade_date);
-            """
-        ),
-        (
-            "Actualizar estadísticas: bronze.market_data",
-            "ANALYZE bronze.market_data;"
-        ),
-        (
-            "Actualizar estadísticas: silver.dim_assets",
-            "ANALYZE silver.dim_assets;"
-        ),
-        (
-            "Actualizar estadísticas: silver.fact_market_prices",
-            "ANALYZE silver.fact_market_prices;"
-        )
     ]
 
     print("Conectando a PostgreSQL / Supabase...")
@@ -65,9 +39,9 @@ def run_db_optimizations():
             print(f"Ejecutando: {description}...")
             conn.execute(text(query))
             conn.commit()
-            print(f"  └─ Finalizado con éxito.\n")
+            print("  └─ Finalizado con éxito.\n")
             
-        # 3. Comprobar que los índices existen
+        # 3. Comprobar que los índices existen en pg_indexes
         print("=" * 60)
         print("VERIFICANDO CREACIÓN DE ÍNDICES EN PG_INDEXES...")
         print("=" * 60)
@@ -81,6 +55,7 @@ def run_db_optimizations():
             FROM pg_indexes
             WHERE schemaname IN ('bronze', 'silver')
               AND indexname IN (
+                  'idx_fact_macro_values_lookup',
                   'idx_bronze_market_data_asset_date',
                   'idx_dim_assets_bronze_id',
                   'uq_fact_market_prices_asset_date'
@@ -95,7 +70,7 @@ def run_db_optimizations():
                 print(f"Esquema: {row.schemaname} | Tabla: {row.tablename}")
                 print(f"Índice : {row.indexname}")
                 print(f"Definición: {row.indexdef}\n" + "-" * 60)
-            print(f"✔ Se han confirmado {len(results)} de 3 índices esperados.")
+            print(f"✔ Se han verificado {len(results)} índice(s) en la base de datos.")
         else:
             print("⚠ No se encontraron los índices especificados.")
 
