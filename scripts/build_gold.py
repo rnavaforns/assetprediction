@@ -11,7 +11,7 @@ import pandas as pd
 import numpy as np
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, DatabaseError
 from dotenv import load_dotenv
 import csv
 from io import StringIO
@@ -92,7 +92,7 @@ def get_db_engine():
             "keepalives_interval": 10,
             "keepalives_count": 5,
             # Añadido statement_timeout=900000 ms (15 min) a las opciones por defecto
-            "options": "-c client_encoding=UTF8 -c prepare_threshold=0 -c statement_timeout=900000"
+            "options": "-c statement_timeout=900000"
         }
     )
 
@@ -144,7 +144,7 @@ def read_market_data(engine):
     """
     
     with engine.connect() as conn:
-        conn.execute(text("SET statement_timeout = '0';"))
+        conn.execute(text("SET statement_timeout = '0'"))
         df = pd.read_sql(text(query), conn, parse_dates=['trade_date'])
 
     df = df.sort_values(by=['ticker', 'trade_date']).reset_index(drop=True)
