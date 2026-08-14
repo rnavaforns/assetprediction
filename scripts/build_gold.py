@@ -401,7 +401,7 @@ def write_to_gold(df, engine):
                 if_exists='append',
                 index=False,
                 # Usamos nuestra función COPY en lugar de 'multi'
-                method=psql_insert_copy
+                method=psql_insert_copy,
                 chunksize=10000
             )
         logger.info(f"      {len(df_out):,} filas insertadas de manera atómica (COPY).")
