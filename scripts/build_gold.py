@@ -62,7 +62,12 @@ def get_db_engine():
     host = os.getenv("SUPABASE_DB_HOST")
     port = os.getenv("SUPABASE_DB_PORT")
     dbname = os.getenv("SUPABASE_DB_NAME")
-    return create_engine(f"postgresql://{user}:{password}@{host}:{port}/{dbname}")
+    
+    # Añadimos connect_args para saltarnos el bug del pooler de Supabase
+    return create_engine(
+        f"postgresql://{user}:{password}@{host}:{port}/{dbname}",
+        connect_args={"client_encoding": "utf8"}
+    )
 
 
 # Mapeo: código FRED → nombre columna en Gold
