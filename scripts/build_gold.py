@@ -63,10 +63,12 @@ def get_db_engine():
     port = os.getenv("SUPABASE_DB_PORT")
     dbname = os.getenv("SUPABASE_DB_NAME")
     
-    # Añadimos connect_args para saltarnos el bug del pooler de Supabase
     return create_engine(
         f"postgresql://{user}:{password}@{host}:{port}/{dbname}",
-        connect_args={"client_encoding": "utf8"}
+        connect_args={
+            "client_encoding": "utf8",
+            "options": "-c statement_timeout=600000" # 10 minutos de margen
+        }
     )
 
 
@@ -95,6 +97,7 @@ def read_market_data(engine):
     """Lee fact_market_prices JOIN dim_assets (desnormaliza metadata + 19 flags)."""
     logger.info("[1/7] Leyendo datos de mercado + metadata de activos...")
 
+    # Hemos quitado el ORDER BY del final
     query = """
     SELECT
         fmp.asset_key,
@@ -113,9 +116,14 @@ def read_market_data(engine):
         fmp.is_outlier
     FROM silver.fact_market_prices fmp
     JOIN silver.dim_assets da ON fmp.asset_key = da.asset_key
-    ORDER BY da.ticker, fmp.trade_date
     """
+    
+    # 1. Leer los datos tal cual vienen (streaming más rápido)
     df = pd.read_sql(query, engine, parse_dates=['trade_date'])
+    
+    # 2. Ordenar usando el motor C optimizado de Pandas
+    df = df.sort_values(by=['ticker', 'trade_date']).reset_index(drop=True)
+    
     logger.info(f"      {len(df):,} filas × {len(df.columns)} columnas "
                 f"({df['ticker'].nunique()} activos)")
     return df
