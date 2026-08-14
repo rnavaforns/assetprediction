@@ -147,7 +147,10 @@ def read_market_data(engine):
     JOIN silver.dim_assets da ON fmp.asset_key = da.asset_key
     """
     
-    df = pd.read_sql(query, engine, parse_dates=['trade_date'])
+    with engine.connect() as conn:
+        conn.execute(text("SET statement_timeout = '0';"))
+        df = pd.read_sql(text(query), conn, parse_dates=['trade_date'])
+
     df = df.sort_values(by=['ticker', 'trade_date']).reset_index(drop=True)
     
     logger.info(f"      {len(df):,} filas × {len(df.columns)} columnas "
