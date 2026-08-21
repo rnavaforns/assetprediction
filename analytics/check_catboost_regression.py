@@ -2,43 +2,40 @@ import os
 import wandb
 import pandas as pd
 import matplotlib
-# Backend no interactivo para entornos CLI/servidor
+# Fijar backend no interactivo para evitar el UserWarning en CLI
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# Métricas requeridas para este modelo
 TARGET_METRICS = [
-    "cv_mae_mean",
-    "cv_mae_std",
-    "cv_rmse_mean",
-    "cv_rmse_std",
-    "cv_r2_mean",
-    "cv_r2_std"
+    "cv_mean_mae",
+    "cv_mean_rmse",
+    "cv_mean_r2"
 ]
 
-def inspect_all_tft_runs():
+def inspect_all_xgb_regressor_runs():
     api = wandb.Api()
     entity = api.default_entity
-    # Nombre del proyecto tal como está definido en tu script de TFT walkforward
     project_name = "tfm-market-prediction"
     project_path = f"{entity}/{project_name}"
     
-    print(f"🔗 Consultando historial completo de ejecuciones TFT walkforward en {project_path}...")
+    print(f"🔗 Consultando historial completo de ejecuciones en {project_path}...")
     
     try:
-        # Filtrar ejecuciones cuyos nombres contengan 'tft-walkforward'
-        runs = list(api.runs(project_path, filters={"display_name": {"$regex": "tft-walkforward-\d+"}}))
+        # Filtrar ejecuciones cuyo nombre contenga 'catboost-wf-huber-'
+        runs = list(api.runs(project_path, filters={"display_name": {"$regex": "catboost-wf-huber-"}}))
     except Exception as e:
         print(f"❌ Error al conectar con W&B: {e}")
         return
 
     if not runs:
-        print("⚠️ No se encontraron ejecuciones de TFT walkforward en este proyecto.")
+        print("⚠️ No se encontraron ejecuciones coincidentes con 'catboost-wf-huber-' en este proyecto.")
         return
 
-    # Ordenar ejecuciones cronológicamente
+    # Ordenar ejecuciones por fecha de creación (de más antigua a más reciente)
     runs = sorted(runs, key=lambda r: r.created_at)
 
     records = []
@@ -52,10 +49,10 @@ def inspect_all_tft_runs():
         
         found_metric = False
         for m in TARGET_METRICS:
-            # 1. Intentar obtener el valor del summary final
+            # 1. Intentar extraer del summary
             val = summary.get(m)
             
-            # 2. Si no está en summary, buscarlo en el historial de eventos
+            # 2. Si no está en summary, buscar en history
             if val is None:
                 hist = r.history(keys=[m]).dropna()
                 if not hist.empty and m in hist.columns:
@@ -71,15 +68,15 @@ def inspect_all_tft_runs():
             records.append(row)
 
     if not records:
-        print("⚠️ Se encontraron runs de TFT walkforward, pero ninguna ha registrado las métricas `cv_*` indicadas todavía.")
+        print("⚠️ Se encontraron runs de XGBoost walkforward huber time, pero ninguna ha registrado las métricas `cv_*` especificadas.")
         return
 
     df_metrics = pd.DataFrame(records)
 
-    print(f"\n📊 EVOLUCIÓN HISTÓRICA DE MODELOS TFT walkforward ({len(df_metrics)} ejecuciones):")
+    print(f"\n📊 EVOLUCIÓN HISTÓRICA DE MODELOS CATBOOST WALKFORWARD HUBER TIME ({len(df_metrics)} ejecuciones):")
     print(df_metrics.to_string(index=False))
 
-    # Generar gráfica de evolución de las métricas de regresión
+    # Generar gráfica de evolución entre ejecuciones
     plt.figure(figsize=(12, 6))
     
     x_labels = [f"{r['fecha']}\n({r['run_name']})" for r in records]
@@ -94,17 +91,17 @@ def inspect_all_tft_runs():
                 label=metric
             )
 
-    plt.title("Evolución de Estadísticos CV entre Ejecuciones (Temporal Fusion Transformer walkforward)", fontsize=13)
+    plt.title("Evolución de Métricas de Test entre Ejecuciones (CATBOOST Walkforward HUBER)", fontsize=13)
     plt.xlabel("Ejecución / Fecha", fontsize=10)
     plt.ylabel("Valor de Métrica", fontsize=10)
     plt.xticks(range(len(df_metrics)), x_labels, rotation=25, ha='right', fontsize=8)
     plt.grid(True, linestyle="--", alpha=0.5)
-    plt.legend(loc='upper right')
+    plt.legend(loc='best')
     plt.tight_layout()
 
-    output_plot = "tft_wf_cv_evolution.png"
+    output_plot = "catboost_walkerforward_huber_time_evolution.png"
     plt.savefig(output_plot, dpi=300)
     print(f"\n🖼️ Gráfica de evolución guardada en: {output_plot}")
 
 if __name__ == "__main__":
-    inspect_all_tft_runs()
+    inspect_all_xgb_regressor_runs()
