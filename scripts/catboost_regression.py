@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import TimeSeriesSplit
 from dotenv import load_dotenv
+import shap
 
 load_dotenv()
 
@@ -132,21 +133,59 @@ def main():
         eval_model.fit(X_train, y_train, cat_features=cat_features_indices)
         y_pred = eval_model.predict(X_test)
         
-        mae, rmse, r2 = mean_absolute_error(y_test, y_pred), np.sqrt(mean_squared_error(y_test, y_pred)), r2_score(y_test, y_pred)
-        wandb.log({f"fold_{fold}/mae": mae, f"fold_{fold}/rmse": rmse, f"fold_{fold}/r2": r2})
-        fold_metrics.append({"mae": mae, "rmse": rmse, "r2": r2})
+        mae = mean_absolute_error(y_test, y_pred)
+        rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+        r2 = r2_score(y_test, y_pred)
+        
+        # Métricas Financieras
+        hit_rate, sharpe, hit_rate_hv = calculate_financial_metrics(y_test.values, y_pred, X_test)
+        
+        wandb.log({
+            f"fold_{fold}/mae": mae, 
+            f"fold_{fold}/rmse": rmse, 
+            f"fold_{fold}/r2": r2,
+            f"fold_{fold}/hit_rate": hit_rate,
+            f"fold_{fold}/sharpe": sharpe,
+            f"fold_{fold}/hit_rate_vix_gt_20": hit_rate_hv
+        })
+        fold_metrics.append({
+            "mae": mae, "rmse": rmse, "r2": r2, 
+            "hit_rate": hit_rate, "sharpe": sharpe
+        })
 
     avg_mae = np.mean([m['mae'] for m in fold_metrics])
     avg_rmse = np.mean([m['rmse'] for m in fold_metrics])
     avg_r2 = np.mean([m['r2'] for m in fold_metrics])
-    wandb.log({"cv_mean_mae": avg_mae, "cv_mean_rmse": avg_rmse, "cv_mean_r2": avg_r2})
+    avg_hit_rate = np.mean([m['hit_rate'] for m in fold_metrics])
+    avg_sharpe = np.mean([m['sharpe'] for m in fold_metrics])
+    wandb.log({"cv_mean_mae": avg_mae, "cv_mean_rmse": avg_rmse, "cv_mean_r2": avg_r2, "cv_mean_hit_rate": avg_hit_rate, "cv_mean_sharpe": avg_sharpe})
 
     print(f"\n==================================================")
-    print(f"Rendimiento Promedio CV CatBoost (Huber) -> MAE: {avg_mae:.4f} | RMSE: {avg_rmse:.4f} | R2: {avg_r2:.4f}")
+    print(f"Rendimiento Promedio CV CatBoost (Huber) -> MAE: {avg_mae:.4f} | RMSE: {avg_rmse:.4f} | R2: {avg_r2:.4f} | Hit Rate: {avg_hit_rate:.4f} | Sharpe: {avg_sharpe:.4f}")
     
     print("\nEntrenando modelo final CatBoost en todo el dataset histórico...")
     final_model = CatBoostRegressor(**best_params)
     final_model.fit(X, y, cat_features=cat_features_indices)
+
+    print("Generando explicabilidad SHAP (Beyond Black Boxes)...")
+    # CatBoost requiere un objeto Pool para manejar correctamente las categóricas con SHAP
+    pool_X = Pool(X, cat_features=cat_features_indices)
+    explainer = shap.TreeExplainer(final_model)
+    shap_values = explainer.shap_values(pool_X)
+
+    fig_shap = plt.figure(figsize=(12, 8))
+    shap.summary_plot(shap_values, X, show=False, max_display=20)
+    plt.title("SHAP Summary - Impacto direccional de las variables")
+    plt.tight_layout()
+    wandb.log({"shap_summary_plot": wandb.Image(fig_shap)})
+    plt.close()
+
+    fig_bar = plt.figure(figsize=(10, 8))
+    shap.summary_plot(shap_values, X, plot_type="bar", show=False, max_display=20)
+    plt.title("SHAP Feature Importance (Magnitud Media)")
+    plt.tight_layout()
+    wandb.log({"shap_bar_importance": wandb.Image(fig_bar)})
+    plt.close()
     
     # Gráfico de Importancia de Variables adaptado a CatBoost
     importances = final_model.get_feature_importance()
@@ -169,6 +208,26 @@ def main():
     artifact.add_file(model_path)
     wandb.log_artifact(artifact)
     wandb.finish()
+
+def calculate_financial_metrics(y_true, y_pred, X_test):
+    """Calcula métricas financieras y de régimen basadas en las predicciones."""
+    # 1. Hit Rate (Acierto Direccional Largo/Corto)
+    hit_rate = np.mean(np.sign(y_true) == np.sign(y_pred))
+    
+    # 2. Retorno de la Estrategia (Multiplicar el signo de predicción por el retorno real)
+    strategy_returns = np.sign(y_pred) * y_true
+    
+    # 3. Ratio de Sharpe Anualizado (asumiendo periodos de 5 días)
+    sharpe_ratio = (np.mean(strategy_returns) / (np.std(strategy_returns) + 1e-9)) * np.sqrt(252/5)
+    
+    # 4. Evaluación bajo Estrés (Ej: VIX > 20)
+    hit_rate_high_vol = np.nan
+    if 'vix' in X_test.columns:
+        high_vol_mask = X_test['vix'] > 20
+        if sum(high_vol_mask) > 0:
+            hit_rate_high_vol = np.mean(np.sign(y_true[high_vol_mask]) == np.sign(y_pred[high_vol_mask]))
+            
+    return hit_rate, sharpe_ratio, hit_rate_high_vol
 
 if __name__ == "__main__":
     main()

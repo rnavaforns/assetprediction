@@ -250,11 +250,21 @@ def main():
 
         print(f"✔ Fold {fold + 1} Finalizado -> MAE: {mae:.4f} | RMSE: {rmse:.4f} | R2: {r2:.4f}")
 
-        # Registrar métricas del fold en W&B
+        hit_rate, sharpe, hit_rate_high_vol = calculate_financial_metrics(y_true, y_pred, df_val)
+        
+        print(f"  Finanzas -> Hit Rate: {hit_rate:.2%} | Sharpe: {sharpe:.2f} | Hit Rate (VIX>20): {hit_rate_high_vol:.2%}")
+
+        # --- NUEVO: EXPLICABILIDAD ---
+        log_tft_interpretability(best_tft, raw_predictions, fold + 1)
+
+        # Actualizar el diccionario wandb.log existente:
         wandb.log({
             f"fold_{fold+1}_mae": mae,
             f"fold_{fold+1}_rmse": rmse,
             f"fold_{fold+1}_r2": r2,
+            f"fold_{fold+1}_hit_rate": hit_rate,
+            f"fold_{fold+1}_sharpe": sharpe,
+            f"fold_{fold+1}_hit_rate_high_vol": hit_rate_high_vol
         })
 
         fold_results.append({
@@ -262,7 +272,10 @@ def main():
             "mae": mae,
             "rmse": rmse,
             "r2": r2,
-            "model_path": best_model_path
+            "model_path": best_model_path,
+            "hit_rate": hit_rate,
+            "sharpe": sharpe,
+            "hit_rate_high_vol": hit_rate_high_vol
         })
 
         # Liberar memoria entre folds
@@ -275,10 +288,16 @@ def main():
     maes = [r["mae"] for r in fold_results]
     rmses = [r["rmse"] for r in fold_results]
     r2s = [r["r2"] for r in fold_results]
+    hit_rates = [r["hit_rate"] for r in fold_results]
+    sharpes = [r["sharpe"] for r in fold_results]
+    hit_rates_high_vol = [r["hit_rate_high_vol"] for r in fold_results]
 
     mean_mae, std_mae = np.mean(maes), np.std(maes)
     mean_rmse, std_rmse = np.mean(rmses), np.std(rmses)
     mean_r2, std_r2 = np.mean(r2s), np.std(r2s)
+    mean_hit_rate, std_hit_rate = np.mean(hit_rates), np.std(hit_rates)
+    mean_sharpe, std_sharpe = np.mean(sharpes), np.std(sharpes)
+    mean_hit_rate_high_vol, std_hit_rate_high_vol = np.nanmean(hit_rates_high_vol), np.nanstd(hit_rates_high_vol)
 
     print(f"\n==================================================")
     print(f"    RESUMEN FINAL WALK-FORWARD CV ({n_folds} FOLDS)")
@@ -286,6 +305,9 @@ def main():
     print(f"MAE  : {mean_mae:.4f} ± {std_mae:.4f}")
     print(f"RMSE : {mean_rmse:.4f} ± {std_rmse:.4f}")
     print(f"R2   : {mean_r2:.4f} ± {std_r2:.4f}")
+    print(f"Hit Rate : {mean_hit_rate:.2%} ± {std_hit_rate:.2%}")
+    print(f"Sharpe   : {mean_sharpe:.2f} ± {std_sharpe:.2f}")
+    print(f"Hit Rate (VIX>20) : {mean_hit_rate_high_vol:.2%} ± {std_hit_rate_high_vol:.2%}")
     print(f"==================================================")
 
     # Registrar en W&B las métricas aggregate comparables con CatBoost/XGBoost
@@ -295,7 +317,13 @@ def main():
         "cv_rmse_mean": mean_rmse,
         "cv_rmse_std": std_rmse,
         "cv_r2_mean": mean_r2,
-        "cv_r2_std": std_r2
+        "cv_r2_std": std_r2,
+        "cv_hit_rate_mean": mean_hit_rate,
+        "cv_hit_rate_std": std_hit_rate,
+        "cv_sharpe_mean": mean_sharpe,
+        "cv_sharpe_std": std_sharpe,
+        "cv_hit_rate_high_vol_mean": mean_hit_rate_high_vol,
+        "cv_hit_rate_high_vol_std": std_hit_rate_high_vol
     })
 
     # Guardar como artefato el mejor modelo global (de menor MAE entre los folds)
@@ -306,6 +334,41 @@ def main():
 
     wandb.finish()
 
+def calculate_financial_metrics(y_true, y_pred, df_val):
+    # 1. Hit Rate (Acierto Direccional)
+    hit_rate = np.mean(np.sign(y_true) == np.sign(y_pred))
+
+    # 2. Retorno de la Estrategia (Largo/Corto simétrico)
+    strategy_returns = np.sign(y_pred) * y_true
+    
+    # 3. Ratio de Sharpe Anualizado (Ajustado a ventanas de 5 días)
+    sharpe_ratio = (np.mean(strategy_returns) / (np.std(strategy_returns) + 1e-9)) * np.sqrt(252/5)
+    
+    # 4. Evaluación por Regímenes de Estrés (VIX > 20)
+    # Alineamos la longitud del VIX con las predicciones reales
+    vix_val = df_val['vix'].iloc[-len(y_true):].values 
+    high_vol_mask = vix_val > 20
+    
+    if sum(high_vol_mask) > 0:
+        hit_rate_high_vol = np.mean(np.sign(y_true[high_vol_mask]) == np.sign(y_pred[high_vol_mask]))
+    else:
+        hit_rate_high_vol = np.nan
+        
+    return hit_rate, sharpe_ratio, hit_rate_high_vol
+
+def log_tft_interpretability(best_tft, raw_predictions, fold):
+    import matplotlib.pyplot as plt
+    
+    # Extraer pesos de atención y variables clave
+    interpretation = best_tft.interpret_output(raw_predictions, reduction="sum")
+    figs = best_tft.plot_interpretation(interpretation)
+    
+    # Registrar gráficos de explicabilidad en W&B
+    wandb.log({
+        f"fold_{fold}_importance_encoder": wandb.Image(figs["encoder_variables"]),
+        f"fold_{fold}_attention": wandb.Image(figs["attention"])
+    })
+    plt.close('all')
 
 if __name__ == "__main__":
     main()
