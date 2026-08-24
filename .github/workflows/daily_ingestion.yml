@@ -156,23 +156,29 @@ jobs:
         WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
       run: python scripts/train_tft_walkforward.py
 
+    # 19. Modelo CatBoost regresor con Walk-Forward + PseudoHuber + Optuna + GARCH
+    - name: Train CatBoost Walk-Forward Regressor (Pseudo-Huber + Optuna + GARCH)
+      env:
+        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      run: python scripts/catboost_garch_regression.py
+
     # =========================================================================
     # MODELOS DE CLASIFICACIÓN (DIRECCIONAL SUBE/BAJA)
     # =========================================================================
 
-    # 19. Clasificador Baseline (Split 80/20 simple)
+    # 20. Clasificador Baseline (Split 80/20 simple)
     - name: Train Baseline XGBoost Classifier
       env:
         WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
       run: python scripts/train_xgb_classifier.py
 
-    # 20. Clasificador Avanzado (Walk-Forward CV + Embargo + Optuna)
+    # 21. Clasificador Avanzado (Walk-Forward CV + Embargo + Optuna)
     - name: Train XGBoost Walk-Forward Classifier (Optuna)
       env:
         WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
       run: python scripts/train_xgb_walkforward_classifier.py
 
-    # 21. Clasificador CatBoost (Walk-Forward CV + Embargo + Optuna)
+    # 22. Clasificador CatBoost (Walk-Forward CV + Embargo + Optuna)
     - name: Train CatBoost Walk-Forward Classifier (Optuna)
       env:
         WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
