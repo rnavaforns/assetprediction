@@ -168,11 +168,17 @@ jobs:
     #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
     #   run: python scripts/train_xgb_walkforward_huber_time_garch.py
 
-    # 21. TFT con análisis de momento de mercado
-    - name: Train TFT con análisis de régimen de mercado
+    # # 21. TFT con análisis de momento de mercado
+    # - name: Train TFT con análisis de régimen de mercado
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/tft_walkforward_regime_aware.py
+
+    # 22. Catboost con análisis de momento de mercado
+    - name: Train Catboost con análisis de régimen de mercado
       env:
         WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/tft_walkforward_regime_aware.py
+      run: python scripts/catboost_garch_regression_regime_aware.py
 
     # =========================================================================
     # MODELOS DE CLASIFICACIÓN (DIRECCIONAL SUBE/BAJA)
