@@ -41,58 +41,58 @@ jobs:
         pip install torch --extra-index-url https://download.pytorch.org/whl/cpu
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-    # 5. Ejecutar el Pipeline de Mercado (Yahoo Finance)
-    - name: Run Market Ingestion
-      env:
-        SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
-        SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
-        SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
-        SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
-        SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
-      run: python scripts/ingesta_market.py
+    # # 5. Ejecutar el Pipeline de Mercado (Yahoo Finance)
+    # - name: Run Market Ingestion
+    #   env:
+    #     SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+    #     SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+    #     SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
+    #     SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
+    #     SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+    #   run: python scripts/ingesta_market.py
 
-    # 6. Ejecutar el Pipeline Macroeconómico (FRED API)
-    - name: Run Macro Ingestion
-      env:
-        SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
-        SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
-        SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
-        SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
-        SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
-        FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-      run: python scripts/ingesta_macro.py
+    # # 6. Ejecutar el Pipeline Macroeconómico (FRED API)
+    # - name: Run Macro Ingestion
+    #   env:
+    #     SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+    #     SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+    #     SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
+    #     SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
+    #     SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+    #     FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+    #   run: python scripts/ingesta_macro.py
 
-    # 7. Ejecutar el Pipeline de Sentimiento (FinBERT)
-    - name: Run Sentiment Ingestion
-      env:
-        SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
-        SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
-        SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
-        SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
-        SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
-        FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
-      run: python scripts/ingesta_sentiment.py
+    # # 7. Ejecutar el Pipeline de Sentimiento (FinBERT)
+    # - name: Run Sentiment Ingestion
+    #   env:
+    #     SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+    #     SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+    #     SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
+    #     SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
+    #     SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+    #     FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+    #   run: python scripts/ingesta_sentiment.py
       
-    # 8. Transformación Bronze -> Silver
-    - name: Transformación Bronze -> Silver
-      env:
-        SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
-        SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
-        SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
-        SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
-        SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
-        FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
-      run: python scripts/transform_silver.py
+    # # 8. Transformación Bronze -> Silver
+    # - name: Transformación Bronze -> Silver
+    #   env:
+    #     SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+    #     SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+    #     SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
+    #     SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
+    #     SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+    #     FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+    #   run: python scripts/transform_silver.py
 
-    # 9. Transformación Silver -> Gold
-    - name: Transformación Silver -> Gold
-      env:
-        SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
-        SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
-        SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
-        SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
-        SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
-      run: python scripts/build_gold.py --horizon 5
+    # # 9. Transformación Silver -> Gold
+    # - name: Transformación Silver -> Gold
+    #   env:
+    #     SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+    #     SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+    #     SUPABASE_DB_HOST: ${{ secrets.SUPABASE_DB_HOST }}
+    #     SUPABASE_DB_PORT: ${{ secrets.SUPABASE_DB_PORT }}
+    #     SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
+    #   run: python scripts/build_gold.py --horizon 5
 
     # 10. Extracción Única: Crea el .parquet local
     - name: Fetch Gold Dataset to Local Parquet
@@ -104,88 +104,94 @@ jobs:
         SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
       run: python scripts/fetch_data.py
 
-    # =========================================================================
-    # MODELOS DE REGRESIÓN (ESTUDIO DE ABLACIÓN)
-    # =========================================================================
+    # # =========================================================================
+    # # MODELOS DE REGRESIÓN (ESTUDIO DE ABLACIÓN)
+    # # =========================================================================
 
-    # 11. Regresor Baseline (Split 80/20 simple, MSE Loss)
-    - name: Train Baseline XGBoost Regressor
+    # # 11. Regresor Baseline (Split 80/20 simple, MSE Loss)
+    # - name: Train Baseline XGBoost Regressor
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/train_xgboost.py
+
+    # # 12. Regresor Walk-Forward (CV con embargo de 5 días)
+    # - name: Train XGBoost Walk-Forward Regressor
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/train_xgb_walkforward.py
+
+    # # 13. Regresor Baseline con Pseudo-Huber Loss + Optuna
+    # - name: Train XGBoost Regressor (Pseudo-Huber + Optuna)
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/train_xgboost_huber.py
+
+    # # 14. Modelo Regresor con (Walk-Forward CV + Embargo + Pseudo-Huber + Optuna)
+    # - name: Train XGBoost Walk-Forward Regressor (Pseudo-Huber + Optuna)
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/train_xgb_walkforward_huber.py
+
+    # # 15. Modelo regresor con (Walk-Forward CV + Embargo + Pseudo-Huber + Optuna) incluyendo variables temporales
+    # - name: Train XGBoost Walk-Forward Regressor (Pseudo-Huber + Optuna) with time variables
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/train_xgb_walkforward_huber_time.py
+
+    # # 16. Modelo CatBoost regresor con Walk-Forward + PseudoHuber + Optuna
+    # - name: Train CatBoost Walk-Forward Regressor (Pseudo-Huber + Optuna)
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/catboost_regression.py
+
+    # # 17. Modelo TFT Regresor
+    # - name: Train Temporal Fusion Transformer (TFT) Regressor
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/train_tft.py
+
+    # #18. Modelo TFT Regresor con WalkForward
+    # - name: Train Temporal Fusion Transformer (TFT) with WalkForward
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/train_tft_walkforward.py
+
+    # # 19. Modelo CatBoost regresor con Walk-Forward + PseudoHuber + Optuna + GARCH
+    # - name: Train CatBoost Walk-Forward Regressor (Pseudo-Huber + Optuna + GARCH)
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/catboost_garch_regression.py
+
+    # # 20. Modelo regresor con (Walk-Forward CV + Embargo + Pseudo-Huber + Optuna) incluyendo variables temporales + GARCH
+    # - name: Train XGBoost Walk-Forward Regressor (Pseudo-Huber + Optuna + GARCH)
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/train_xgb_walkforward_huber_time_garch.py
+
+    # 21. TFT con análisis de momento de mercado
+    - name: Train TFT con análisis de régimen de mercado
       env:
         WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/train_xgboost.py
-
-    # 12. Regresor Walk-Forward (CV con embargo de 5 días)
-    - name: Train XGBoost Walk-Forward Regressor
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/train_xgb_walkforward.py
-
-    # 13. Regresor Baseline con Pseudo-Huber Loss + Optuna
-    - name: Train XGBoost Regressor (Pseudo-Huber + Optuna)
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/train_xgboost_huber.py
-
-    # 14. Modelo Regresor con (Walk-Forward CV + Embargo + Pseudo-Huber + Optuna)
-    - name: Train XGBoost Walk-Forward Regressor (Pseudo-Huber + Optuna)
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/train_xgb_walkforward_huber.py
-
-    # 15. Modelo regresor con (Walk-Forward CV + Embargo + Pseudo-Huber + Optuna) incluyendo variables temporales
-    - name: Train XGBoost Walk-Forward Regressor (Pseudo-Huber + Optuna) with time variables
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/train_xgb_walkforward_huber_time.py
-
-    # 16. Modelo CatBoost regresor con Walk-Forward + PseudoHuber + Optuna
-    - name: Train CatBoost Walk-Forward Regressor (Pseudo-Huber + Optuna)
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/catboost_regression.py
-
-    # 17. Modelo TFT Regresor
-    - name: Train Temporal Fusion Transformer (TFT) Regressor
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/train_tft.py
-
-    #18. Modelo TFT Regresor con WalkForward
-    - name: Train Temporal Fusion Transformer (TFT) with WalkForward
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/train_tft_walkforward.py
-
-    # 19. Modelo CatBoost regresor con Walk-Forward + PseudoHuber + Optuna + GARCH
-    - name: Train CatBoost Walk-Forward Regressor (Pseudo-Huber + Optuna + GARCH)
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/catboost_garch_regression.py
-
-    # 20. Modelo regresor con (Walk-Forward CV + Embargo + Pseudo-Huber + Optuna) incluyendo variables temporales + GARCH
-    - name: Train XGBoost Walk-Forward Regressor (Pseudo-Huber + Optuna + GARCH)
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/train_xgb_walkforward_huber_time_garch.py
+      run: python scripts/tft_walkforward_regime_aware.py
 
     # =========================================================================
     # MODELOS DE CLASIFICACIÓN (DIRECCIONAL SUBE/BAJA)
     # =========================================================================
 
-    # 20. Clasificador Baseline (Split 80/20 simple)
-    - name: Train Baseline XGBoost Classifier
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/train_xgb_classifier.py
+    # # 22. Clasificador Baseline (Split 80/20 simple)
+    # - name: Train Baseline XGBoost Classifier
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/train_xgb_classifier.py
 
-    # 21. Clasificador Avanzado (Walk-Forward CV + Embargo + Optuna)
-    - name: Train XGBoost Walk-Forward Classifier (Optuna)
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/train_xgb_walkforward_classifier.py
+    # # 23. Clasificador Avanzado (Walk-Forward CV + Embargo + Optuna)
+    # - name: Train XGBoost Walk-Forward Classifier (Optuna)
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/train_xgb_walkforward_classifier.py
 
-    # 22. Clasificador CatBoost (Walk-Forward CV + Embargo + Optuna)
-    - name: Train CatBoost Walk-Forward Classifier (Optuna)
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/catboost_classification.py
+    # # 24. Clasificador CatBoost (Walk-Forward CV + Embargo + Optuna)
+    # - name: Train CatBoost Walk-Forward Classifier (Optuna)
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/catboost_classification.py
