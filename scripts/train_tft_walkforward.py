@@ -342,8 +342,8 @@ def extract_vix_for_predictions(validation_data, df_val, max_prediction_length):
     # Crear un diccionario de búsqueda rápida por (ticker, time_idx)
     vix_lookup = df_val.set_index(['ticker', 'time_idx'])['vix'].to_dict()
     
-    sample_tickers = validation_data.index["ticker"].values
-    sample_last_idxs = validation_data.index["time_idx_last"].values
+    sample_tickers = validation_data.decoded_index["ticker"].values
+    sample_last_idxs = validation_data.decoded_index["time_idx_last"].values
     
     vix_list = []
     # Reconstruir la secuencia temporal exacta para cada muestra y cada día del horizonte (1..max_prediction_length)
