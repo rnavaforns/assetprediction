@@ -255,7 +255,7 @@ def main():
         print(f"  Finanzas -> Hit Rate: {hit_rate:.2%} | Sharpe: {sharpe:.2f} | Hit Rate (VIX>20): {hit_rate_high_vol:.2%}")
 
         # --- NUEVO: EXPLICABILIDAD ---
-        log_tft_interpretability(best_tft, raw_predictions, fold + 1)
+        log_tft_interpretability(best_tft, val_dataloader, fold + 1)
 
         # Actualizar el diccionario wandb.log existente:
         wandb.log({
@@ -374,11 +374,14 @@ def calculate_financial_metrics(y_true, y_pred, df_val, validation_data=None, ma
 
     return hit_rate, sharpe_ratio, hit_rate_high_vol
 
-def log_tft_interpretability(best_tft, raw_predictions, fold):
+def log_tft_interpretability(best_tft, val_dataloader, fold):
     import matplotlib.pyplot as plt
     
-    # Extraer pesos de atención y variables clave
-    interpretation = best_tft.interpret_output(raw_predictions, reduction="sum")
+    # 1. Obtener la salida 'raw' de la red (incluye los pesos de atención)
+    raw_preds = best_tft.predict(val_dataloader, mode="raw", return_x=True)
+    
+    # 2. Extraer pesos de atención accediendo a .output
+    interpretation = best_tft.interpret_output(raw_preds.output, reduction="sum")
     figs = best_tft.plot_interpretation(interpretation)
     
     # Registrar gráficos de explicabilidad en W&B
