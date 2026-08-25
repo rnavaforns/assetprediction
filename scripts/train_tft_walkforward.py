@@ -250,7 +250,7 @@ def main():
 
         print(f"✔ Fold {fold + 1} Finalizado -> MAE: {mae:.4f} | RMSE: {rmse:.4f} | R2: {r2:.4f}")
 
-        hit_rate, sharpe, hit_rate_high_vol = calculate_financial_metrics(y_true, y_pred, df_val)
+        hit_rate, sharpe, hit_rate_high_vol = calculate_financial_metrics(y_true, y_pred, df_val, validation_data, CONFIG["max_prediction_length"])
         
         print(f"  Finanzas -> Hit Rate: {hit_rate:.2%} | Sharpe: {sharpe:.2f} | Hit Rate (VIX>20): {hit_rate_high_vol:.2%}")
 
@@ -334,7 +334,26 @@ def main():
 
     wandb.finish()
 
-def calculate_financial_metrics(y_true, y_pred, df_val):
+def extract_vix_for_predictions(validation_data, df_val, max_prediction_length):
+    """Mapea de forma exacta el valor de VIX para cada horizonte de prediccion en y_true/y_pred."""
+    if 'vix' not in df_val.columns:
+        return None
+        
+    # Crear un diccionario de búsqueda rápida por (ticker, time_idx)
+    vix_lookup = df_val.set_index(['ticker', 'time_idx'])['vix'].to_dict()
+    
+    sample_tickers = validation_data.index["ticker"].values
+    sample_last_idxs = validation_data.index["time_idx_last"].values
+    
+    vix_list = []
+    # Reconstruir la secuencia temporal exacta para cada muestra y cada día del horizonte (1..max_prediction_length)
+    for ticker, last_idx in zip(sample_tickers, sample_last_idxs):
+        for t in range(last_idx - max_prediction_length + 1, last_idx + 1):
+            vix_list.append(vix_lookup.get((ticker, t), np.nan))
+            
+    return np.array(vix_list)
+
+def calculate_financial_metrics(y_true, y_pred, df_val, validation_data=None, max_prediction_length=5):
     # 1. Hit Rate (Acierto Direccional)
     hit_rate = np.mean(np.sign(y_true) == np.sign(y_pred))
 
@@ -342,18 +361,17 @@ def calculate_financial_metrics(y_true, y_pred, df_val):
     strategy_returns = np.sign(y_pred) * y_true
     
     # 3. Ratio de Sharpe Anualizado (Ajustado a ventanas de 5 días)
-    sharpe_ratio = (np.mean(strategy_returns) / (np.std(strategy_returns) + 1e-9)) * np.sqrt(252/5)
+    sharpe_ratio = (np.mean(strategy_returns) / (np.std(strategy_returns) + 1e-9)) * np.sqrt(252 / 5)
     
     # 4. Evaluación por Regímenes de Estrés (VIX > 20)
-    # Alineamos la longitud del VIX con las predicciones reales
-    vix_val = df_val['vix'].iloc[-len(y_true):].values 
-    high_vol_mask = vix_val > 20
-    
-    if sum(high_vol_mask) > 0:
-        hit_rate_high_vol = np.mean(np.sign(y_true[high_vol_mask]) == np.sign(y_pred[high_vol_mask]))
-    else:
-        hit_rate_high_vol = np.nan
-        
+    hit_rate_high_vol = np.nan
+    if validation_data is not None and 'vix' in df_val.columns:
+        vix_array = extract_vix_for_predictions(validation_data, df_val, max_prediction_length)
+        if vix_array is not None and len(vix_array) == len(y_true):
+            high_vol_mask = (vix_array > 20) & (~np.isnan(vix_array))
+            if np.sum(high_vol_mask) > 0:
+                hit_rate_high_vol = np.mean(np.sign(y_true[high_vol_mask]) == np.sign(y_pred[high_vol_mask]))
+
     return hit_rate, sharpe_ratio, hit_rate_high_vol
 
 def log_tft_interpretability(best_tft, raw_predictions, fold):

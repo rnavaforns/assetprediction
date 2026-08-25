@@ -3,3 +3,8 @@
 wandb/
 xgb_model.json
 data/
+*.png
+*.tsv
+*.tfevents
+*.json
+*.cbm
