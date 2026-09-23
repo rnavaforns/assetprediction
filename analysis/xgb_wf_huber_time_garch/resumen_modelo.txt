@@ -1,0 +1,14 @@
+Resumen ejecutivo del modelo XGBoost Walk-forward Huber + Time + GARCH
+================================================================================
+Ejecuciones analizadas: 57
+Primera ejecución: 2026-08-12 11:09
+Última ejecución: 2026-09-23 00:49
+
+MAE: último=0.0198, primero=0.0202, cambio=-0.0004, tendencia=-0.000008 por ejecución
+RMSE: último=0.0299, primero=0.0303, cambio=-0.0004, tendencia=-0.000010 por ejecución
+R2: último=-0.1906, primero=-0.2118, cambio=0.0212, tendencia=0.000520 por ejecución
+Hit rate: último=0.5117, primero=nan, cambio=nan, tendencia=-0.000146 por ejecución
+
+Conclusión de calidad: el modelo se considera débil en regresión en la última ejecución (MAE=0.0198, R2=-0.1906).
+Conclusión de dirección: la última tasa de acierto (0.512) está en rango marginal, sin indicar una ventaja clara todavía.
+Evolución temporal: 3/4 métricas muestran mejora clara con el tiempo; esto sugiere mejora sostenida en el modelo.
