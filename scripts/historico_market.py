@@ -1,5 +1,6 @@
 import logging
 import os
+import argparse
 import pandas as pd
 import yfinance as yf
 from sqlalchemy import create_engine, text
@@ -25,12 +26,14 @@ def get_db_engine():
     connection_string = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
     return create_engine(connection_string)
 
-def cargar_historico_market():
-    FECHA_INICIO_HISTORICO = "2021-01-01"
+def cargar_historico_market(fecha_inicio_historico: str):
     engine = get_db_engine()
     rows_inserted = 0
     
-    logger.info(f"🚀 INICIANDO CARGA HISTÓRICA DE MERCADO DESDE: {FECHA_INICIO_HISTORICO}")
+    logger.info(
+        "🚀 INICIANDO CARGA HISTÓRICA DE MERCADO DESDE: "
+        f"{fecha_inicio_historico}"
+    )
 
     try:
         with engine.connect() as conn:
@@ -47,28 +50,28 @@ def cargar_historico_market():
             insert_query = text("""
                 INSERT INTO bronze.market_data (asset_id, trade_date, open, high, low, close, adj_close, volume)
                 VALUES (:asset_id, :trade_date, :open, :high, :low, :close, :adj_close, :volume)
-                ON CONFLICT (asset_id, trade_date) DO NOTHING;
+                ON CONFLICT (asset_id, trade_date) DO UPDATE SET
+                    open = EXCLUDED.open,
+                    high = EXCLUDED.high,
+                    low = EXCLUDED.low,
+                    close = EXCLUDED.close,
+                    adj_close = EXCLUDED.adj_close,
+                    volume = EXCLUDED.volume;
             """)
 
-            # 2. Iterar por cada activo calculando su ventana temporal óptima
+            # 2. Releer el rango completo solicitado. Esto rellena huecos
+            # internos y actualiza precios ajustados revisados por el proveedor.
             for asset_id, ticker in assets_list:
-                
-                # Consultar si ya existen datos para este activo y obtener la fecha más antigua guardada
-                check_query = text("""
-                    SELECT MIN(trade_date) FROM bronze.market_data WHERE asset_id = :asset_id;
-                """)
-                min_date_existente = conn.execute(check_query, {"asset_id": asset_id}).scalar()
-                
-                # Configurar dinámicamente las fechas de descarga según tu objetivo
-                if min_date_existente is None:
-                    # CASO 1: Producto nuevo. Descarga desde 2021 hasta hoy de forma abierta
-                    logger.info(f"🔄 Ticker {ticker} no tiene datos previos. Descargando completo desde {FECHA_INICIO_HISTORICO} hasta hoy.")
-                    df = yf.download(ticker, start=FECHA_INICIO_HISTORICO, progress=False, auto_adjust=False)
-                else:
-                    # CASO 2: Ya existen datos (ej. desde Abril 2026). Rellenar el pasado de 2021 a Abril 2026
-                    fecha_fin_backfill = min_date_existente.strftime('%Y-%m-%d')
-                    logger.info(f"⏳ Ticker {ticker} ya tiene datos desde {fecha_fin_backfill}. Rellenando hueco histórico ({FECHA_INICIO_HISTORICO} ➔ {fecha_fin_backfill}).")
-                    df = yf.download(ticker, start=FECHA_INICIO_HISTORICO, end=fecha_fin_backfill, progress=False, auto_adjust=False)
+                logger.info(
+                    f"🔄 Descargando histórico de {ticker} desde "
+                    f"{fecha_inicio_historico} hasta la fecha más reciente."
+                )
+                df = yf.download(
+                    ticker,
+                    start=fecha_inicio_historico,
+                    progress=False,
+                    auto_adjust=False,
+                )
                 
                 if df.empty:
                     logger.warning(f"⚠ No se encontraron datos históricos para: {ticker} en el rango solicitado.")
@@ -113,8 +116,18 @@ def cargar_historico_market():
             conn.commit()
             logger.info(f"🔥 ¡CARGA HISTÓRICA DE MERCADO FINALIZADA! Total nuevos registros indexados: {rows_inserted}")
             
-    except Exception as e:
-        logger.error(f"Error crítico en la carga histórica de mercado: {e}")
+    except Exception:
+        logger.exception("Error crítico en la carga histórica de mercado.")
+        raise
 
 if __name__ == "__main__":
-    cargar_historico_market()
+    parser = argparse.ArgumentParser(
+        description="Backfill de precios desde Yahoo Finance a Bronze."
+    )
+    parser.add_argument(
+        "--start-date",
+        default=os.getenv("HISTORICAL_START_DATE", "2010-01-01"),
+        help="Primera fecha a descargar (default: 2010-01-01).",
+    )
+    args = parser.parse_args()
+    cargar_historico_market(args.start_date)

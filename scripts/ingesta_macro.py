@@ -1,136 +1,134 @@
+"""Incrementally upsert point-in-time FRED/ALFRED macro snapshots."""
+
 import logging
 import os
-import pandas as pd
-import time  # <-- Importamos la librería de tiempo
+import time
+from datetime import date, timedelta
+
+from dotenv import load_dotenv
 from fredapi import Fred
 from sqlalchemy import create_engine, text
-from dotenv import load_dotenv
-from datetime import datetime, timedelta
 
-# Cargar el archivo .env apuntando a la raíz del proyecto
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
+from fred_macro_vintages import (
+    SUPPORTED_MACRO_SERIES,
+    fetch_release_snapshots,
+)
 
-# Configuración de Logging
+
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-def get_db_engine():
-    user = os.getenv("SUPABASE_DB_USER")
-    password = os.getenv("SUPABASE_DB_PASSWORD")
-    host = os.getenv("SUPABASE_DB_HOST")
-    port = os.getenv("SUPABASE_DB_PORT")
-    dbname = os.getenv("SUPABASE_DB_NAME")
 
-    connection_string = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
+def get_db_engine():
+    connection_string = (
+        f"postgresql://{os.getenv('SUPABASE_DB_USER')}"
+        f":{os.getenv('SUPABASE_DB_PASSWORD')}"
+        f"@{os.getenv('SUPABASE_DB_HOST')}"
+        f":{os.getenv('SUPABASE_DB_PORT')}"
+        f"/{os.getenv('SUPABASE_DB_NAME')}"
+    )
     return create_engine(connection_string)
 
-def write_ingestion_log(connection, script_name, status, rows_inserted=0, error_message=None):
-    """Escribe el resultado de la ejecución en la tabla de logs."""
-    try:
-        log_query = text("""
-            INSERT INTO bronze.ingestion_logs (script_name, status, rows_inserted, error_message)
-            VALUES (:script_name, :status, :rows_inserted, :error_message);
-        """)
-        connection.execute(log_query, {
-            "script_name": script_name,
+
+def write_ingestion_log(connection, status, rows_inserted=0, error_message=None):
+    connection.execute(
+        text(
+            """
+            INSERT INTO bronze.ingestion_logs
+                (script_name, status, rows_inserted, error_message)
+            VALUES ('ingesta_macro.py', :status, :rows_inserted, :error_message)
+            """
+        ),
+        {
             "status": status,
             "rows_inserted": rows_inserted,
-            "error_message": error_message
-        })
-        connection.commit()
-    except Exception as log_e:
-        logger.error(f"No se pudo escribir en la tabla de logs: {log_e}")
+            "error_message": error_message,
+        },
+    )
+
 
 def ingesta_macro_incremental():
-    script_name = "ingesta_macro.py"
-    fred_api_key = os.getenv('FRED_API_KEY')
-    engine = get_db_engine()
-    rows_inserted = 0
-    
+    fred_api_key = os.getenv("FRED_API_KEY")
     if not fred_api_key:
-        logger.error("FRED_API_KEY no encontrada en el archivo .env")
-        return
+        raise RuntimeError("FRED_API_KEY no encontrada en el archivo .env")
 
-    # Calcular la ventana incremental (últimos 30 días)
-    fecha_limite = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
-    logger.info(f"Iniciando ingesta incremental. Solicitando datos desde: {fecha_limite}")
+    start_date = os.getenv("HISTORICAL_START_DATE", "2010-01-01")
+    lookback_days = int(os.getenv("MACRO_INCREMENTAL_LOOKBACK_DAYS", "400"))
+    release_cutoff = date.today() - timedelta(days=lookback_days)
+    engine = get_db_engine()
+    fred = Fred(api_key=fred_api_key)
 
+    with engine.connect() as conn:
+        catalog_indicators = conn.execute(
+            text("SELECT indicator_id, code FROM bronze.macro_indicators ORDER BY code;")
+        ).fetchall()
+    indicators = [
+        (indicator_id, code)
+        for indicator_id, code in catalog_indicators
+        if code in SUPPORTED_MACRO_SERIES
+    ]
+    ignored_codes = sorted(
+        {code for _, code in catalog_indicators if code not in SUPPORTED_MACRO_SERIES}
+    )
+    if ignored_codes:
+        logger.warning(
+            "Se omiten indicadores Bronze sin mapeo point-in-time en Gold: %s",
+            ", ".join(ignored_codes),
+        )
+    if not indicators:
+        raise ValueError("No se encontraron indicadores en bronze.macro_indicators.")
+
+    # The ALFRED call includes vintage dates, not just observation periods.
+    # Re-reading a bounded recent vintage window also captures revisions.
+    snapshots_by_indicator = {}
     try:
-        fred = Fred(api_key=fred_api_key)
-        
-        with engine.connect() as conn:
-            # 1. Leer los indicadores registrados en la base de datos
-            macro_query = text("SELECT indicator_id, code FROM bronze.macro_indicators;")
-            indicators_list = conn.execute(macro_query).fetchall()
-            
-            if not indicators_list:
-                raise ValueError("No se encontraron indicadores en 'macro_indicators'.")
+        for indicator_id, code in indicators:
+            snapshots = fetch_release_snapshots(fred, code, start_date)
+            snapshots_by_indicator[indicator_id] = [
+                snapshot
+                for snapshot in snapshots
+                if snapshot["release_date"] >= release_cutoff
+            ]
+            time.sleep(1.2)
 
-            # Query idempotente
-            insert_query = text("""
-                INSERT INTO bronze.macro_data (indicator_id, release_date, reference_period, value)
-                VALUES (:indicator_id, :release_date, :reference_period, :value)
-                ON CONFLICT (indicator_id, release_date) DO NOTHING;
-            """)
+        rows_written = 0
+        with engine.begin() as conn:
+            insert_query = text(
+                """
+                INSERT INTO bronze.macro_data
+                    (indicator_id, release_date, reference_period, value)
+                VALUES
+                    (:indicator_id, :release_date, :reference_period, :value)
+                ON CONFLICT (indicator_id, release_date) DO UPDATE SET
+                    reference_period = EXCLUDED.reference_period,
+                    value = EXCLUDED.value;
+                """
+            )
+            for indicator_id, _ in indicators:
+                rows = [
+                    {"indicator_id": indicator_id, **snapshot}
+                    for snapshot in snapshots_by_indicator[indicator_id]
+                ]
+                if rows:
+                    conn.execute(insert_query, rows)
+                    rows_written += len(rows)
+            write_ingestion_log(conn, "SUCCESS", rows_written)
 
-            # 2. Descargar datos optimizados de la FRED
-            for indicator_id, code in indicators_list:
-                try:
-                    # --- PAUSA ESTRATÉGICA (ANTI RATE-LIMIT) ---
-                    time.sleep(1.5)  # Espera un segundo y medio antes de cada petición
-                    # --------------------------------------------
-                    
-                    # Usamos observation_start para pedir SOLO los últimos 30 días
-                    raw_series = fred.get_series(code, observation_start=fecha_limite)
-                    
-                    if raw_series.empty:
-                        logger.info(f"➖ Sin nuevas actualizaciones para {code} en los últimos 30 días.")
-                        continue
-                        
-                    # Limpieza del DataFrame incremental
-                    df = pd.DataFrame(raw_series, columns=['value'])
-                    df.index.name = 'reference_period'
-                    df['value'] = pd.to_numeric(df['value'], errors='coerce')
-                    df = df.dropna()
-                    
-                    # 3. Guardar en la base de datos
-                    series_inserted = 0
-                    for ref_date, row in df.iterrows():
-                        reference_period = ref_date.date()
-                        
-                        result = conn.execute(insert_query, {
-                            "indicator_id": indicator_id,
-                            "release_date": reference_period, 
-                            "reference_period": reference_period,
-                            "value": float(row['value'])
-                        })
-                        
-                        if result.rowcount > 0:
-                            series_inserted += 1
-                            rows_inserted += 1
-                    
-                    if series_inserted > 0:
-                        logger.info(f"✔ {code}: {series_inserted} nuevos registros añadidos.")
-                        
-                except Exception as series_e:
-                    logger.error(f"❌ Error en la serie {code}: {series_e}")
-                    continue
+        logger.info(
+            "Ingesta macro point-in-time completada: %s snapshots desde %s.",
+            f"{rows_written:,}",
+            release_cutoff,
+        )
+    except Exception as exc:
+        logger.exception("Falló la ingesta macro point-in-time.")
+        with engine.begin() as conn:
+            write_ingestion_log(conn, "FAILED", error_message=str(exc))
+        raise
 
-            conn.commit()
-            logger.info(f"✔ Ingesta diaria completada. Total filas nuevas: {rows_inserted}")
-            write_ingestion_log(conn, script_name, "SUCCESS", rows_inserted=rows_inserted)
-
-    except Exception as e:
-        error_msg = f"Error crítico en el pipeline macro incremental: {str(e)}"
-        logger.error(error_msg)
-        try:
-            with engine.connect() as conn_err:
-                write_ingestion_log(conn_err, script_name, "FAILED", rows_inserted=rows_inserted, error_message=error_msg)
-        except Exception as log_e:
-            logger.error(f"Error registrando fallo: {log_e}")
 
 if __name__ == "__main__":
     ingesta_macro_incremental()

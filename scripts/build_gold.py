@@ -43,6 +43,8 @@ MACRO_COLUMN_MAP = {
     'M2SL':       'm2_transformed',
     'UNRATE':     'unrate',
     'ICSA':       'jobless_claims_transformed',
+    # Legacy Gold column name retained for existing table compatibility;
+    # the source series is industrial production (INDPRO), not PMI.
     'INDPRO':     'pmi_transformed',
     'DGS10':      'yield_10y',
     'DGS2':       'yield_2y',
@@ -518,9 +520,10 @@ def merge_macro_into_market(
 ):
     """
     Hace un as-of join:
-    Para cada trade_date se utiliza el último valor
-    macro disponible en release_date <= trade_date.
-    Esto es mucho más correcto que un reindex exacto.
+    Para cada trade_date se utiliza el último snapshot macro con
+    release_date < trade_date. Al no conservar hora de publicación,
+    excluir el mismo día evita usar un dato que pudo publicarse después
+    del cierre de mercado.
     """
     if df_macro.empty:
         return df_market
@@ -541,7 +544,8 @@ def merge_macro_into_market(
         macro,
         left_on='trade_date',
         right_on='macro_date',
-        direction='backward'
+        direction='backward',
+        allow_exact_matches=False
     )
     if 'macro_date' in result.columns:
         result = result.drop(

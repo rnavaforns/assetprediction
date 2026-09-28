@@ -81,7 +81,7 @@ CONFIG = {
     "dropout": 0.1,
     "random_state": 42,
     "target": "forward_return_5d",
-    "start_date": "2021-01-01",
+    "start_date": os.getenv("TFT_START_DATE", "2010-01-01"),
     "market_ticker": "SPY",
     "parquet_path": "data/gold_dataset.parquet",
     "prediction_csv": "data/tft_prediction_level.csv",
@@ -141,11 +141,18 @@ def load_gold_data(parquet_path: str) -> pd.DataFrame:
             "Ejecuta primero el proceso que genera gold_dataset.parquet."
         )
     df = pd.read_parquet(parquet_path)
-    if "is_outlier" in df.columns:
-        df = df[df["is_outlier"] == False].copy()
     if "trade_date" not in df.columns:
         raise ValueError("El dataset necesita la columna trade_date.")
     df["trade_date"] = pd.to_datetime(df["trade_date"])
+    df = df.sort_values(["ticker", "trade_date"]).reset_index(drop=True)
+    # El label forward_return_5d termina cinco observaciones futuras del
+    # ticker después de trade_date. Usamos la fecha real del extremo del
+    # label para aplicar el embargo de cada fold en calendario.
+    df["target_end_date"] = df.groupby("ticker")["trade_date"].shift(
+        CONFIG["max_prediction_length"]
+    )
+    if "is_outlier" in df.columns:
+        df = df[df["is_outlier"] == False].copy()
     start_date = pd.Timestamp(CONFIG["start_date"])
     df = df[df["trade_date"] >= start_date].copy()
     if CONFIG["target"] not in df.columns:
@@ -156,9 +163,7 @@ def load_gold_data(parquet_path: str) -> pd.DataFrame:
         df[CONFIG["target"]], errors="coerce"
     )
     df = df[df[CONFIG["target"]].notna()].copy()
-    df = df.sort_values(
-        ["ticker", "trade_date"]
-    ).reset_index(drop=True)
+    df = df.sort_values(["ticker", "trade_date"]).reset_index(drop=True)
     print(
         f"Datos cargados: {df.shape[0]} filas, "
         f"{df.shape[1]} columnas, desde {df['trade_date'].min().date()} "
@@ -365,7 +370,8 @@ def prepare_data_for_tft(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     """
     df = df.copy()
     df["ticker"] = df["ticker"].astype(str)
-    # Índice temporal por ticker.
+    # Índice secuencial interno por ticker. Los cortes de folds se hacen
+    # por trade_date común, nunca comparando este índice entre tickers.
     df["time_idx"] = (
         df.groupby("ticker")["trade_date"]
         .rank(method="dense")
@@ -493,7 +499,13 @@ def prepare_data_for_tft(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     # --------------------------------------------------------
     exclude_cols = (
         cat_cols
-        + ["trade_date", "day_of_week", "month", "time_idx"]
+        + [
+            "trade_date",
+            "target_end_date",
+            "day_of_week",
+            "month",
+            "time_idx",
+        ]
     )
     num_cols = [
         c for c in df.columns
@@ -599,58 +611,79 @@ def prepare_data_for_tft(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
 # CHECKS DE LEAKAGE
 # ============================================================
 def check_fold_boundaries(
-    df: pd.DataFrame,
-    val_start: int,
-    train_information_cutoff: int,
+    df_train: pd.DataFrame,
+    validation_start_date: pd.Timestamp,
 ):
     """
     Verifica que el entrenamiento no utilice targets cuyo resultado
     todavía no estaba disponible en el corte temporal.
-    Para horizonte H:
-        target(t) solo está disponible en t+H.
-    Por eso, para un validation start = T:
-        train target timestamps <= T-H.
+    Se compara la fecha final real del retorno forward de cada ticker
+    contra la primera fecha de validación. Así el embargo sigue siendo
+    correcto aunque haya festivos o huecos distintos entre activos.
     """
-    horizon = CONFIG["max_prediction_length"]
-    expected_target_cutoff = val_start - horizon
-    if train_information_cutoff != expected_target_cutoff:
+    if "target_end_date" not in df_train.columns:
         raise AssertionError(
-            "Corte de targets incorrecto. "
-            f"Esperado <= {expected_target_cutoff}, "
-            f"recibido <= {train_information_cutoff}."
+            "df_train no incluye target_end_date para auditar el embargo."
         )
-    print(
-        f"  ✔ Leakage check target: train target time_idx <= "
-        f"{train_information_cutoff}"
-    )
+    latest_label_end = df_train["target_end_date"].max()
+    if pd.isna(latest_label_end) or latest_label_end >= validation_start_date:
+        raise AssertionError(
+            "El entrenamiento contiene un target cuyo resultado no era "
+            "conocido antes del inicio de validación: "
+            f"último target_end_date={latest_label_end}, "
+            f"validation_start={validation_start_date}."
+        )
+    print(f"  ✔ Leakage check target end: {latest_label_end.date()}")
 
 def build_fold_datasets(
     df: pd.DataFrame,
     known_reals: list[str],
-    val_start: int,
-    val_end: int,
+    validation_start_date: pd.Timestamp,
+    validation_end_date: pd.Timestamp,
 ):
     """
     Construye train/validation manteniendo correctamente separada
     la información temporal.
     """
-    horizon = CONFIG["max_prediction_length"]
-    # El label forward_return_5d para t necesita información hasta t+5.
-    train_target_cutoff = val_start - horizon
     check_fold_boundaries(
-        df=df,
-        val_start=val_start,
-        train_information_cutoff=train_target_cutoff,
+        df_train=df[
+            df["target_end_date"] < validation_start_date
+        ],
+        validation_start_date=validation_start_date,
     )
-    # Dataset de entrenamiento.
+    # El label de cada fila termina en target_end_date. Solo entran en train
+    # muestras cuyo retorno completo ya había terminado antes de validar.
     df_train = df[
-        df["time_idx"] <= train_target_cutoff
+        df["target_end_date"] < validation_start_date
     ].copy()
-    # Para validación necesitamos el contexto de encoder.
-    df_val = df[
-        (df["time_idx"] > (val_start - CONFIG["max_encoder_length"]))
-        & (df["time_idx"] <= val_end)
-    ].copy()
+
+    # Para cada ticker, incluir sus últimas 30 observaciones antes del corte
+    # y todas sus filas dentro de la misma ventana de validación calendario.
+    # Esto conserva el encoder sin depender de índices reiniciados por ticker.
+    val_frames = []
+    train_tickers = set(df_train["ticker"].astype(str).unique())
+    for ticker, ticker_df in df.groupby("ticker", sort=False):
+        # El embedding estático ticker solo puede evaluar categorías vistas
+        # durante el entrenamiento de este fold.
+        if str(ticker) not in train_tickers:
+            continue
+        ticker_df = ticker_df.sort_values("trade_date")
+        context = ticker_df[
+            ticker_df["trade_date"] < validation_start_date
+        ].tail(CONFIG["max_encoder_length"])
+        targets = ticker_df[
+            (ticker_df["trade_date"] >= validation_start_date)
+            & (ticker_df["trade_date"] <= validation_end_date)
+        ]
+        if len(context) >= CONFIG["max_encoder_length"] and not targets.empty:
+            val_frames.append(pd.concat([context, targets], ignore_index=False))
+    df_val = (
+        pd.concat(val_frames, ignore_index=True)
+        if val_frames
+        else df.iloc[0:0].copy()
+    )
+    df_train = df_train.drop(columns=["target_end_date"])
+    df_val = df_val.drop(columns=["target_end_date"])
     if df_train.empty:
         raise ValueError("Fold sin datos de entrenamiento.")
     if df_val.empty:
@@ -796,9 +829,17 @@ def build_prediction_level_dataframe(
             pred_value = float(
                 y_pred[sample_idx, horizon_step - 1]
             )
-            # Para el decoder de PyTorch Forecasting, la secuencia
-            # futura comienza después del último punto del encoder.
-            forecast_origin_idx = target_idx - 1
+            # Las cinco salidas de una muestra comparten el mismo
+            # origen: el último punto del encoder, inmediatamente antes
+            # del primer paso del decoder. No usar target_idx - 1 aquí:
+            # eso desplaza el origen hacia delante en horizon_step - 1.
+            forecast_origin_idx = target_idx - horizon_step
+            expected_origin_idx = last_idx - decoder_length
+            if forecast_origin_idx != expected_origin_idx:
+                raise AssertionError(
+                    "El origen reconstruido no coincide con el final del encoder: "
+                    f"{forecast_origin_idx} != {expected_origin_idx}."
+                )
             target_key = (ticker, target_idx)
             origin_key = (ticker, forecast_origin_idx)
             target_info = lookup.loc[target_key] if target_key in lookup.index else None
@@ -808,6 +849,7 @@ def build_prediction_level_dataframe(
                 "ticker": ticker,
                 "horizon_step": horizon_step,
                 "prediction_time_idx": forecast_origin_idx,
+                "origin_mapping_version": 2,
                 "target_time_idx": target_idx,
                 "y_true": true_value,
                 "y_pred": pred_value,
@@ -1143,15 +1185,40 @@ def main():
     # --------------------------------------------------------
     # WALK-FORWARD
     # --------------------------------------------------------
-    max_time_idx = int(df["time_idx"].max())
+    market_ticker = CONFIG["market_ticker"]
+    session_dates = pd.DatetimeIndex(
+        df.loc[
+            df["ticker"].astype(str) == market_ticker,
+            "trade_date",
+        ]
+        .drop_duplicates()
+        .sort_values()
+    )
+    if session_dates.empty:
+        raise ValueError(
+            f"No hay sesiones de referencia para {market_ticker}."
+        )
     n_folds = CONFIG["n_folds"]
     fold_size = CONFIG["fold_size"]
+    minimum_sessions = (
+        n_folds * fold_size
+        + CONFIG["max_prediction_length"]
+        + CONFIG["max_encoder_length"]
+        + 1
+    )
+    if len(session_dates) < minimum_sessions:
+        raise ValueError(
+            f"Solo hay {len(session_dates)} sesiones de {market_ticker}; "
+            f"se necesitan "
+            f"al menos {minimum_sessions} para {n_folds} folds de "
+            f"{fold_size} sesiones y sus ventanas de contexto."
+        )
     fold_results = []
     prediction_frames = []
     print("\n==================================================")
     print(
         f" WALK-FORWARD CV: {n_folds} folds x "
-        f"{fold_size} días"
+        f"{fold_size} sesiones de {market_ticker}"
     )
     print("==================================================")
     for fold in range(n_folds):
@@ -1160,26 +1227,18 @@ def main():
             f"               EJECUTANDO FOLD {fold + 1}/{n_folds}"
         )
         print("==================================================")
-        val_end = (
-            max_time_idx
+        val_end_pos = (
+            len(session_dates)
+            - 1
             - (n_folds - 1 - fold) * fold_size
         )
-        val_start = val_end - fold_size
-        # "validation start" es el primer punto que no se
-        # utiliza como target de entrenamiento.
-        #
-        # El target del día t utiliza t+5.
-        train_target_cutoff = (
-            val_start
-            - CONFIG["max_prediction_length"]
-        )
-        print(
-            f"  • Train target cutoff : "
-            f"time_idx <= {train_target_cutoff}"
-        )
+        val_boundary_pos = val_end_pos - fold_size
+        validation_start_date = session_dates[val_boundary_pos + 1]
+        validation_end_date = session_dates[val_end_pos]
         print(
             f"  • Validation          : "
-            f"{val_start} < time_idx <= {val_end}"
+            f"{validation_start_date.date()} -> "
+            f"{validation_end_date.date()}"
         )
         (
             df_train,
@@ -1189,8 +1248,8 @@ def main():
         ) = build_fold_datasets(
             df=df,
             known_reals=known_reals,
-            val_start=val_start,
-            val_end=val_end,
+            validation_start_date=validation_start_date,
+            validation_end_date=validation_end_date,
         )
         print(
             f"  • Filas train: {len(df_train)}"
@@ -1351,6 +1410,12 @@ def main():
         })
         fold_results.append({
             "fold": fold + 1,
+            "validation_start_date": validation_start_date,
+            "validation_end_date": validation_end_date,
+            "latest_train_label_end_date": df.loc[
+                df["target_end_date"] < validation_start_date,
+                "target_end_date",
+            ].max(),
             "mae": metrics["mae"],
             "rmse": metrics["rmse"],
             "r2": metrics["r2"],

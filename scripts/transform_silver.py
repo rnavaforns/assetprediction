@@ -9,12 +9,14 @@ Prerrequisitos:
 
 Uso:
     python transform_silver.py
+    python transform_silver.py --full-refresh
 
 Frecuencia:
     Ejecutar una vez al día, después de la ingesta a Bronze.
 ============================================================
 """
 
+import argparse
 import os
 import logging
 from sqlalchemy import create_engine, text
@@ -228,7 +230,8 @@ WITH recent_bronze AS (
         LAG(m.close) OVER (PARTITION BY m.asset_id ORDER BY m.trade_date) AS prev_close,
         ROW_NUMBER() OVER (PARTITION BY m.asset_id, m.trade_date ORDER BY m.id DESC) AS rn
     FROM bronze.market_data m
-    WHERE m.trade_date >= (CURRENT_DATE - (:lookback_days * INTERVAL '1 day'))::DATE
+    WHERE :full_refresh
+       OR m.trade_date >= (CURRENT_DATE - (:lookback_days * INTERVAL '1 day'))::DATE
 )
 INSERT INTO silver.fact_market_prices (
     asset_key, trade_date, open, high, low, close, adj_close, volume,
@@ -252,7 +255,10 @@ SELECT
 FROM recent_bronze rb
 JOIN silver.dim_assets da ON rb.asset_id = da.asset_id_bronze
 WHERE rb.rn = 1
-  AND rb.trade_date >= (CURRENT_DATE - (:target_days * INTERVAL '1 day'))::DATE
+  AND (
+      :full_refresh
+      OR rb.trade_date >= (CURRENT_DATE - (:target_days * INTERVAL '1 day'))::DATE
+  )
 ON CONFLICT (asset_key, trade_date) DO UPDATE SET
     open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low, close = EXCLUDED.close,
     adj_close = EXCLUDED.adj_close, volume = EXCLUDED.volume, daily_return = EXCLUDED.daily_return,
@@ -269,7 +275,8 @@ SQL_FACT_MACRO_VALUES = """
 WITH recent_macro AS (
     SELECT *
     FROM bronze.macro_data
-    WHERE release_date >= (CURRENT_DATE - (:lookback_days * INTERVAL '1 day'))::DATE
+    WHERE :full_refresh
+       OR release_date >= (CURRENT_DATE - (:lookback_days * INTERVAL '1 day'))::DATE
 ),
 ranked_macro AS (
     SELECT
@@ -297,7 +304,10 @@ SELECT
     END AS transformed_value
 FROM ranked_macro
 WHERE rn = 1
-  AND release_date >= (CURRENT_DATE - (:target_days * INTERVAL '1 day'))::DATE
+  AND (
+      :full_refresh
+      OR release_date >= (CURRENT_DATE - (:target_days * INTERVAL '1 day'))::DATE
+  )
 ON CONFLICT (indicator_key, release_date) DO UPDATE SET
     reference_period = EXCLUDED.reference_period, value = EXCLUDED.value,
     reported_value_change = EXCLUDED.reported_value_change, transformed_value = EXCLUDED.transformed_value;
@@ -457,7 +467,7 @@ VALIDATIONS = {
 # ============================================================
 # PIPELINE PRINCIPAL
 # ============================================================
-def run_silver_pipeline():
+def run_silver_pipeline(full_refresh: bool = False):
     engine = get_db_engine()
     script_name = "transform_silver.py"
     total_rows = 0
@@ -492,18 +502,44 @@ def run_silver_pipeline():
             logger.info(f"      {rows} indicadores sincronizados con unit + is_rate_type.")
 
             # STEP 4: FACT_MARKET_PRICES
-            logger.info("[4/7] Transformando precios de mercado (Incremental)...")
-            # Parámetros: Miramos 15 días atrás, pero solo insertamos los últimos 7
-            res = conn.execute(text(SQL_FACT_MARKET_PRICES).bindparams(lookback_days=15, target_days=7))
+            market_mode = "Completo" if full_refresh else "Incremental"
+            logger.info(
+                f"[4/7] Transformando precios de mercado ({market_mode})..."
+            )
+            # En full refresh, LAG se calcula sobre todo Bronze y se
+            # reprocesan todas las fechas para rellenar también la historia.
+            res = conn.execute(
+                text(SQL_FACT_MARKET_PRICES).bindparams(
+                    lookback_days=15,
+                    target_days=7,
+                    full_refresh=full_refresh,
+                )
+            )
             rows = res.rowcount or 0
             total_rows += rows
             conn.commit()
             logger.info(f"      {rows} filas procesadas.")
 
             # STEP 5: FACT_MACRO_VALUES
-            logger.info("[5/7] Transformando valores macro (Incremental)...")
-            # Parámetros: Miramos 400 días atrás para asegurar el LAG trimestral, insertamos los últimos 30 días
-            res = conn.execute(text(SQL_FACT_MACRO_VALUES).bindparams(lookback_days=400, target_days=30))
+            macro_mode = "Completo" if full_refresh else "Incremental"
+            logger.info(
+                f"[5/7] Transformando valores macro ({macro_mode})..."
+            )
+            if full_refresh:
+                # Elimina eventos antiguos mal fechados; Bronze ya se ha
+                # reemplazado con las fechas ALFRED antes de este paso.
+                # El DELETE y el INSERT quedan en la misma transacción para
+                # conservar Silver si el reprocesamiento falla.
+                conn.execute(text("DELETE FROM silver.fact_macro_values;"))
+            # En modo incremental se mantienen 400 días de contexto para
+            # calcular cambios de valor y solo se insertan los últimos 30.
+            res = conn.execute(
+                text(SQL_FACT_MACRO_VALUES).bindparams(
+                    lookback_days=400,
+                    target_days=30,
+                    full_refresh=full_refresh,
+                )
+            )
             rows = res.rowcount or 0
             total_rows += rows
             conn.commit()
@@ -592,4 +628,14 @@ def run_silver_pipeline():
 
 
 if __name__ == "__main__":
-    run_silver_pipeline()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--full-refresh",
+        action="store_true",
+        help=(
+            "Procesa todos los registros Bronze. Recalcula los precios y "
+            "reconstruye Silver macro para retirar eventos con fechas antiguas."
+        ),
+    )
+    args = parser.parse_args()
+    run_silver_pipeline(full_refresh=args.full_refresh)

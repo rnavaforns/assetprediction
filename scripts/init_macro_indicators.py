@@ -18,12 +18,12 @@ def get_db_engine():
 # Lista de los 13 indicadores macro con sus códigos oficiales de la FRED
 MACRO_DATA = [
     {"code": "FEDFUNDS", "name": "Federal Funds Effective Rate", "frequency": "Monthly"},
-    {"code": "ECBMAINR", "name": "ECB Main Refinancing Operations Rate", "frequency": "Monthly"},
+    {"code": "ECBMRRFR", "name": "ECB Main Refinancing Operations Rate", "frequency": "Daily"},
     {"code": "CPIAUCSL", "name": "Consumer Price Index for All Urban Consumers (CPI-U)", "frequency": "Monthly"},
     {"code": "M2SL", "name": "M2 Monetary Stock", "frequency": "Monthly"},
     {"code": "UNRATE", "name": "Civilian Unemployment Rate", "frequency": "Monthly"},
     {"code": "ICSA", "name": "Initial Jobless Claims", "frequency": "Weekly"},
-    {"code": "ISMCONPMI", "name": "ISM Manufacturing PMI", "frequency": "Monthly"},
+    {"code": "INDPRO", "name": "Industrial Production: Total Index", "frequency": "Monthly"},
     {"code": "DGS10", "name": "10-Year Treasury Constant Maturity Yield", "frequency": "Daily"},
     {"code": "DGS2", "name": "2-Year Treasury Constant Maturity Yield", "frequency": "Daily"},
     {"code": "T10Y2Y", "name": "10-Year Treasury Constant Maturity Minus 2-Year Treasury", "frequency": "Daily"},
@@ -38,13 +38,15 @@ def populate_macro_indicators():
         
         with engine.connect() as connection:
             print("✅ Conexión a Supabase establecida con éxito.")
-            inserted_count = 0
+            synced_count = 0
             
             for indicator in MACRO_DATA:
                 query = text("""
                     INSERT INTO bronze.macro_indicators (code, name, frequency)
                     VALUES (:code, :name, :frequency)
-                    ON CONFLICT (code) DO NOTHING;
+                    ON CONFLICT (code) DO UPDATE SET
+                        name = EXCLUDED.name,
+                        frequency = EXCLUDED.frequency;
                 """)
                 
                 result = connection.execute(query, {
@@ -54,16 +56,18 @@ def populate_macro_indicators():
                 })
                 
                 if result.rowcount > 0:
-                    print(f"✔ Indicador macro registrado: {indicator['code']}")
-                    inserted_count += 1
-                else:
-                    print(f"➖ El indicador {indicator['code']} ya existía en la base de datos.")
+                    print(f"✔ Indicador macro sincronizado: {indicator['code']}")
+                    synced_count += 1
             
             connection.commit()
-            print(f"\nProceso finalizado. Se han insertado {inserted_count} nuevos indicadores macro.")
+            print(
+                "\nProceso finalizado. Indicadores macro insertados/actualizados: "
+                f"{synced_count}."
+            )
             
     except Exception as e:
         print(f"❌ Error crítico durante la inserción: {e}")
+        raise
 
 if __name__ == "__main__":
     populate_macro_indicators()

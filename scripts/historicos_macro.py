@@ -1,118 +1,157 @@
+"""Backfill point-in-time macro snapshots from FRED/ALFRED into Bronze.
+
+Usage:
+    python scripts/historicos_macro.py --start-date 2010-01-01 --replace-existing
+
+The replacement flag removes the legacy rows whose ``release_date`` was
+incorrectly copied from the observation period, then reloads corrected
+availability-date snapshots.  All API downloads finish before the delete is
+started, so an API failure leaves the existing Bronze data untouched.
+"""
+
+import argparse
 import logging
 import os
-import pandas as pd
 import time
+
+from dotenv import load_dotenv
 from fredapi import Fred
 from sqlalchemy import create_engine, text
-from dotenv import load_dotenv
 
-# Cargar el archivo .env apuntando a la raíz del proyecto
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
+from fred_macro_vintages import (
+    LEGACY_MACRO_SERIES,
+    SUPPORTED_MACRO_SERIES,
+    fetch_release_snapshots,
+)
 
-# Configuración de Logging
+
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 logging.basicConfig(
-    level=logging.INFO, 
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
+
 def get_db_engine():
-    connection_string = f"postgresql://{os.getenv('SUPABASE_DB_USER')}:{os.getenv('SUPABASE_DB_PASSWORD')}@{os.getenv('SUPABASE_DB_HOST')}:{os.getenv('SUPABASE_DB_PORT')}/{os.getenv('SUPABASE_DB_NAME')}"
+    connection_string = (
+        f"postgresql://{os.getenv('SUPABASE_DB_USER')}"
+        f":{os.getenv('SUPABASE_DB_PASSWORD')}"
+        f"@{os.getenv('SUPABASE_DB_HOST')}"
+        f":{os.getenv('SUPABASE_DB_PORT')}"
+        f"/{os.getenv('SUPABASE_DB_NAME')}"
+    )
     return create_engine(connection_string)
 
-def cargar_historico_macro():
-    FECHA_INICIO_HISTORICO = "2021-01-01"
-    fred_api_key = os.getenv('FRED_API_KEY')
-    engine = get_db_engine()
-    rows_inserted = 0
-    
+
+def cargar_historico_macro(start_date: str, replace_existing: bool = False):
+    fred_api_key = os.getenv("FRED_API_KEY")
     if not fred_api_key:
-        logger.error("FRED_API_KEY no encontrada en el archivo .env")
-        return
-    
-    logger.info(f"🚀 INICIANDO CARGA HISTÓRICA MACRO DESDE: {FECHA_INICIO_HISTORICO}")
+        raise RuntimeError("FRED_API_KEY no encontrada en el archivo .env")
 
-    try:
-        fred = Fred(api_key=fred_api_key)
-        
-        with engine.connect() as conn:
-            # 1. Traer indicadores de la tabla maestra en el esquema bronze
-            macro_query = text("SELECT indicator_id, code FROM bronze.macro_indicators;")
-            indicators_list = conn.execute(macro_query).fetchall()
+    engine = get_db_engine()
+    fred = Fred(api_key=fred_api_key)
+    with engine.connect() as conn:
+        catalog_indicators = conn.execute(
+            text("SELECT indicator_id, code FROM bronze.macro_indicators ORDER BY code;")
+        ).fetchall()
+    indicators = [
+        (indicator_id, code)
+        for indicator_id, code in catalog_indicators
+        if code in SUPPORTED_MACRO_SERIES
+    ]
+    ignored_codes = sorted(
+        {code for _, code in catalog_indicators if code not in SUPPORTED_MACRO_SERIES}
+    )
+    if ignored_codes:
+        logger.warning(
+            "Se omiten indicadores Bronze sin mapeo point-in-time en Gold: %s",
+            ", ".join(ignored_codes),
+        )
+    if not indicators:
+        raise ValueError("No hay indicadores en bronze.macro_indicators.")
 
-            if not indicators_list:
-                raise ValueError("No hay indicadores en la tabla 'bronze.macro_indicators'.")
+    # Fetch every series before changing Bronze.  This keeps a failed or
+    # incomplete ALFRED download from leaving a partially erased history.
+    snapshots_by_indicator = {}
+    for indicator_id, code in indicators:
+        logger.info("Descargando vintages ALFRED para %s desde %s...", code, start_date)
+        snapshots_by_indicator[indicator_id] = fetch_release_snapshots(
+            fred, code, start_date
+        )
+        logger.info(
+            "%s: %s snapshots point-in-time.",
+            code,
+            f"{len(snapshots_by_indicator[indicator_id]):,}",
+        )
+        time.sleep(1.2)
 
-            # Query de inserción idempotente
-            insert_query = text("""
-                INSERT INTO bronze.macro_data (indicator_id, release_date, reference_period, value)
-                VALUES (:indicator_id, :release_date, :reference_period, :value)
-                ON CONFLICT (indicator_id, release_date) DO NOTHING;
-            """)
+    with engine.begin() as conn:
+        if replace_existing:
+            replace_ids = {
+                indicator_id
+                for indicator_id, _ in indicators
+            }
+            replace_ids.update(
+                indicator_id
+                for indicator_id, code in catalog_indicators
+                if code in LEGACY_MACRO_SERIES
+            )
+            for indicator_id in replace_ids:
+                conn.execute(
+                    text(
+                        "DELETE FROM bronze.macro_data "
+                        "WHERE indicator_id = :indicator_id"
+                    ),
+                    {"indicator_id": indicator_id},
+                )
 
-            # 2. Iterar por cada indicador macroeconómico
-            for indicator_id, code in indicators_list:
-                
-                # --- PAUSA ESTRATÉGICA (ANTI RATE-LIMIT) ---
-                time.sleep(1.2)
-                
-                # Consultar si ya existen datos para este indicador en bronze
-                check_query = text("""
-                    SELECT MIN(release_date) FROM bronze.macro_data WHERE indicator_id = :indicator_id;
-                """)
-                min_date_existente = conn.execute(check_query, {"indicator_id": indicator_id}).scalar()
+        insert_query = text(
+            """
+            INSERT INTO bronze.macro_data
+                (indicator_id, release_date, reference_period, value)
+            VALUES
+                (:indicator_id, :release_date, :reference_period, :value)
+            ON CONFLICT (indicator_id, release_date) DO UPDATE SET
+                reference_period = EXCLUDED.reference_period,
+                value = EXCLUDED.value;
+            """
+        )
+        rows_written = 0
+        for indicator_id, _ in indicators:
+            rows = [
+                {"indicator_id": indicator_id, **snapshot}
+                for snapshot in snapshots_by_indicator[indicator_id]
+            ]
+            if rows:
+                conn.execute(insert_query, rows)
+                rows_written += len(rows)
 
-                try:
-                    # Configurar dinámicamente los límites de la FRED según tu objetivo
-                    if min_date_existente is None:
-                        # CASO 1: Sin datos previos. Descarga completa desde 2021 hasta hoy
-                        logger.info(f"🔄 Indicador {code} no tiene datos previos. Descargando completo desde {FECHA_INICIO_HISTORICO} hasta hoy.")
-                        raw_series = fred.get_series(code, observation_start=FECHA_INICIO_HISTORICO)
-                    else:
-                        # CASO 2: Ya existen datos parciales. Rellenar el pasado hasta la fecha mínima actual
-                        fecha_fin_backfill = min_date_existente.strftime('%Y-%m-%d')
-                        logger.info(f"⏳ Indicador {code} ya tiene datos desde {fecha_fin_backfill}. Rellenando hueco histórico ({FECHA_INICIO_HISTORICO} ➔ {fecha_fin_backfill}).")
-                        raw_series = fred.get_series(code, observation_start=FECHA_INICIO_HISTORICO, observation_end=fecha_fin_backfill)
-                    
-                    if raw_series.empty:
-                        logger.warning(f"➖ Sin registros históricos para {code} en el rango solicitado.")
-                        continue
-                        
-                    # Procesamiento del DataFrame
-                    df = pd.DataFrame(raw_series, columns=['value'])
-                    df.index.name = 'reference_period'
-                    df['value'] = pd.to_numeric(df['value'], errors='coerce')
-                    df = df.dropna()
-                    
-                    # 3. Insertar registros calculando los cambios reales
-                    indicator_inserted = 0
-                    for ref_date, row in df.iterrows():
-                        reference_period = ref_date.date()
-                        
-                        result = conn.execute(insert_query, {
-                            "indicator_id": indicator_id,
-                            "release_date": reference_period, 
-                            "reference_period": reference_period,
-                            "value": float(row['value'])
-                        })
-                        
-                        if result.rowcount > 0:
-                            indicator_inserted += 1
-                            rows_inserted += 1
-                    
-                    if indicator_inserted > 0:
-                        logger.info(f"✔ Guardados {indicator_inserted} registros históricos para {code}.")
-                        
-                except Exception as series_e:
-                    logger.error(f"❌ Error en serie histórica {code}: {series_e}")
-                    continue
+    logger.info(
+        "Backfill macro Bronze completado: %s snapshots%s.",
+        f"{rows_written:,}",
+        "; filas previas reemplazadas" if replace_existing else "",
+    )
 
-            # Confirmar la transacción completa
-            conn.commit()
-            logger.info(f"🔥 ¡CARGA HISTÓRICA MACRO FINALIZADA! Total nuevas filas indexadas: {rows_inserted}")
-            
-    except Exception as e:
-        logger.error(f"Error crítico en la carga histórica macro: {e}")
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--start-date",
+        default=os.getenv("HISTORICAL_START_DATE", "2010-01-01"),
+        help="Primera fecha de disponibilidad macro a cargar (default: 2010-01-01).",
+    )
+    parser.add_argument(
+        "--replace-existing",
+        action="store_true",
+        help=(
+            "Borra los rows Bronze de los indicadores cargados antes de insertar "
+            "snapshots con fechas de disponibilidad corregidas."
+        ),
+    )
+    args = parser.parse_args()
+    cargar_historico_macro(args.start_date, args.replace_existing)
+
 
 if __name__ == "__main__":
-    cargar_historico_macro()
+    main()

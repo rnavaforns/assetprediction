@@ -42,6 +42,87 @@ def sharpe(values: pd.Series) -> float:
     return float(values.mean() / std * ANNUALIZATION) if std > 1e-12 else np.nan
 
 
+def repair_prediction_origins(pred: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Repair legacy origin dates/features using the overlapping horizon-1 row.
+
+    The old exporter attached regime fields from target_idx - 1 for every
+    decoder step. For a legacy row at (target_idx, horizon_step=h), its actual
+    sample origin is target_idx - h. The row with target_idx=origin_idx+1 has
+    the correct origin metadata under the old exporter, so it is a lookup key.
+    """
+    pred = pred.copy()
+    origin_cols = [c for c in pred.columns if c == "origin_date" or c.startswith("origin_")]
+    required = {"ticker", "target_time_idx", "horizon_step", "prediction_time_idx"}
+    missing = sorted(required - set(pred.columns))
+    if missing or not origin_cols:
+        pred["origin_mapping_repaired"] = False
+        pred["origin_mapping_repair_available"] = False
+        return pred, pd.DataFrame([{
+            "status": "unavailable_missing_columns",
+            "missing_columns": ",".join(missing + ([] if origin_cols else ["origin_*"])),
+            "rows": len(pred),
+            "repaired_rows": 0,
+            "unmatched_rows": len(pred),
+        }])
+
+    if "origin_mapping_version" in pred:
+        versions = pd.to_numeric(pred["origin_mapping_version"], errors="coerce").fillna(1)
+    else:
+        versions = pd.Series(1, index=pred.index, dtype="int64")
+        pred["origin_mapping_version"] = versions
+    legacy_mask = versions < 2
+    pred["origin_mapping_repaired"] = False
+    pred["origin_mapping_repair_available"] = ~legacy_mask
+    pred["_origin_target_idx"] = pd.to_numeric(pred["target_time_idx"], errors="coerce")
+    pred["_origin_horizon_step"] = pd.to_numeric(pred["horizon_step"], errors="coerce")
+
+    group_cols = [c for c in ["artifact_id", "fold", "ticker"] if c in pred.columns]
+    if not group_cols:
+        group_cols = ["ticker"]
+    audit_rows: list[dict] = []
+    current = pred.loc[~legacy_mask]
+    if not current.empty:
+        current_groups = current.groupby(group_cols, dropna=False, sort=False) if group_cols else [((), current)]
+        for group_key, group in current_groups:
+            group_key = group_key if isinstance(group_key, tuple) else (group_key,)
+            audit = dict(zip(group_cols, group_key))
+            audit.update({"status": "already_correct_v2", "rows": len(group), "repaired_rows": 0, "unmatched_rows": 0})
+            audit_rows.append(audit)
+    legacy = pred.loc[legacy_mask]
+    for group_key, group in legacy.groupby(group_cols, dropna=False, sort=False):
+        group_key = group_key if isinstance(group_key, tuple) else (group_key,)
+        audit = dict(zip(group_cols, group_key))
+        target_idx = group["_origin_target_idx"]
+        step = group["_origin_horizon_step"]
+        # Source key is origin+1. In a legacy file that row stores origin=target-1.
+        source_target_idx = target_idx - step + 1
+        source = group.loc[group["_origin_target_idx"].notna(), [*origin_cols, "_origin_target_idx"]].copy()
+        source["_source_key"] = source["_origin_target_idx"].round().astype("Int64")
+        source = source.dropna(subset=["_source_key"]).drop_duplicates("_source_key", keep="first")
+        lookup = source.set_index("_source_key")[origin_cols]
+        wanted = source_target_idx.round().astype("Int64")
+        available = wanted.isin(lookup.index) & target_idx.notna() & step.notna()
+        mapped_values = {col: wanted.map(lookup[col]) for col in origin_cols}
+
+        pred.loc[group.index, "prediction_time_idx"] = (target_idx - step).to_numpy()
+        pred.loc[group.index, "origin_mapping_repaired"] = True
+        pred.loc[group.index, "origin_mapping_repair_available"] = available.to_numpy()
+        pred.loc[group.index, "origin_mapping_version"] = 2
+        for col, values in mapped_values.items():
+            # Missing lookup rows must not retain the known-misaligned value.
+            pred.loc[group.index, col] = values.to_numpy()
+        audit.update({
+            "status": "legacy_repaired" if available.all() else "legacy_partially_repaired",
+            "rows": len(group),
+            "repaired_rows": int(available.sum()),
+            "unmatched_rows": int((~available).sum()),
+        })
+        audit_rows.append(audit)
+
+    pred = pred.drop(columns=["_origin_target_idx", "_origin_horizon_step"])
+    return pred, pd.DataFrame(audit_rows)
+
+
 def normalize_predictions(pred: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, str]]:
     mapping = {
         "prediction": first_column(pred, ["y_pred", "prediction", "predicted", "prediction_value"]),
@@ -265,16 +346,28 @@ def regime_analysis(data: pd.DataFrame, provided: list[pd.DataFrame]) -> tuple[p
         plt.colorbar(label="Hit rate"); plt.yticks(range(len(heat.index)), heat.index); plt.xticks(range(len(heat.columns)), heat.columns, rotation=25, ha="right")
         plt.title("Hit rate by exploratory regime quantile (N is in regime_analysis_summary.csv)"); plt.xlabel("Observed feature quantile bin"); plt.ylabel("Origin regime variable"); savefig("regime_performance_heatmap.png")
     raw = pd.concat(provided, ignore_index=True) if provided else pd.DataFrame()
-    if not raw.empty: raw.to_csv(OUT / "source_regime_analysis.csv", index=False)
-    return result, ("source_regime_analysis.csv" if not raw.empty else None)
+    source_output = None
+    if not raw.empty:
+        raw["origin_alignment_status"] = "legacy_aggregate_not_reconstructable"
+        source_output = "source_regime_analysis_legacy_unverified.csv"
+        raw.to_csv(OUT / source_output, index=False)
+    return result, source_output
 
 
 def tree_summary(records: list[dict]) -> tuple[str, bool]:
     rules: list[str] = []
     importances: list[pd.DataFrame] = []
     for record in records:
+        prediction_file = dataframe_for_basename(record, CSV_PREDICTIONS)
+        versions = (pd.to_numeric(prediction_file.get("origin_mapping_version"), errors="coerce")
+                    if prediction_file is not None and "origin_mapping_version" in prediction_file else pd.Series(dtype=float))
+        has_legacy_origins = prediction_file is None or versions.empty or versions.fillna(1).min() < 2
+        warning = (
+            "Source tree is fit on all folds in the run, so it is not a held-out fold tree. "
+            + ("This historical artifact also has the pre-v2 origin mapping; its regime splits are not trustworthy." if has_legacy_origins else "")
+        )
         text = text_for_basename(record, TXT_RULES)
-        if text: rules.append(f"### {record['metadata'].get('artifact_name')}\n\n{text.strip()}")
+        if text: rules.append(f"### {record['metadata'].get('artifact_name')}\n\n> Caution: {warning}\n\n{text.strip()}")
         imp = dataframe_for_basename(record, CSV_IMPORTANCE)
         if imp is not None:
             imp["artifact_name"] = record["metadata"].get("artifact_name")
@@ -288,26 +381,16 @@ def tree_summary(records: list[dict]) -> tuple[str, bool]:
             avg = importance.groupby(feature_col, as_index=False)[value_col].mean().sort_values(value_col, ascending=False).head(20)
             avg.to_csv(OUT / "regime_variable_importance.csv", index=False)
             plt.figure(figsize=(9, max(4, .35*len(avg))))
-            plt.barh(avg[feature_col][::-1], avg[value_col][::-1]); plt.title("Mean exploratory regime-tree feature importance across runs")
+            plt.barh(avg[feature_col][::-1], avg[value_col][::-1]); plt.title("Legacy all-fold tree importance across runs (exploratory)")
             plt.xlabel("Mean decision-tree importance"); plt.ylabel("Regime variable"); savefig("regime_variable_importance.png")
     return "\n\n".join(rules), bool(importances)
 
 
 def backtest(data: pd.DataFrame, thresholds: list[float]) -> bool:
-    date_col = first_column(data, ["target_date", "origin_date"])
-    if not date_col or data[date_col].notna().sum() == 0: return False
-    sample_thresholds = list(dict.fromkeys(thresholds[:3]))
-    ordered = data.dropna(subset=[date_col]).sort_values(date_col)
-    if ordered.empty: return False
-    plt.figure(figsize=(11, 5))
-    for threshold in sample_thresholds:
-        ret = np.where(ordered["_prediction"] > threshold, ordered["_actual"], 0.0)
-        # Cumulative product is an illustration over overlapping 5-day records, not portfolio accounting.
-        curve = np.cumprod(1 + ret)
-        plt.plot(ordered[date_col], curve, label=f"prediction > {threshold:.4g}")
-    plt.title("Illustrative signal-based backtest — overlapping 5-day returns; no costs")
-    plt.xlabel(date_col.replace("_", " ").title()); plt.ylabel("Illustrative cumulative return (growth of 1)"); plt.legend(); savefig("illustrative_cumulative_return.png")
-    return True
+    # The rows contain multiple tickers, decoder leads, and overlapping 5-session
+    # forward returns. Without a portfolio weighting/holding convention, compounding
+    # each row in sequence is not a meaningful cumulative portfolio return.
+    return False
 
 
 def markdown_table(df: pd.DataFrame, cols: list[str], limit: int = 20) -> str:
@@ -340,6 +423,9 @@ def write_report(repository: str, records: list[dict], pred: pd.DataFrame, folds
     artifact_name_span = f"{artifact_names[0]} … {artifact_names[-1]}" if artifact_names else "none"
     missing = [name for name in [CSV_PREDICTIONS, CSV_REGIME, TXT_RULES, CSV_IMPORTANCE] if not any(Path(p).name == name for p in files)]
     mean_m = metrics(pred)
+    repaired_rows = int(pred.get("origin_mapping_repaired", pd.Series(False, index=pred.index)).sum())
+    unmatched_rows = int((pred.get("origin_mapping_repaired", pd.Series(False, index=pred.index)) &
+                          ~pred.get("origin_mapping_repair_available", pd.Series(False, index=pred.index))).sum())
     fold_rows = folds.copy()
     if "created_at" in fold_rows and fold_rows["created_at"].notna().any():
         newest_run = pd.to_datetime(fold_rows["created_at"], utc=True, errors="coerce").max()
@@ -367,7 +453,9 @@ Suggested patterns: metrics vary across walk-forward periods and daily experimen
 - Metadata retained: artifact ID/name, workflow run ID, creation/update/expiry timestamps.
 - Files observed in ZIPs: {', '.join(Path(p).name for p in files)}.
 - Requested files missing across all artifacts: {', '.join(missing) if missing else 'none'}.
+- Pre-aggregated regime tables from legacy artifacts cannot be remapped without row-level indices; they are preserved as `source_regime_analysis_legacy_unverified.csv`. The corrected `regime_analysis_summary.csv` is rebuilt from repaired prediction rows.
 - Prediction date/origin column identified: `{date_col or 'not available'}`. Observed period: {val_start} → {val_end}.
+- Origin alignment: {repaired_rows:,} latest-artifact rows were repaired from their `target_time_idx`/`horizon_step` and adjacent legacy horizon-1 records; {unmatched_rows:,} lacked a matching row. Per-artifact/fold counts are in `origin_mapping_audit.csv`.
 - The TFT's regime table and tree are generated on the complete prediction set within each individual run; the tree is explicitly exploratory.
 - Model inputs reconstructed from the training code: static categoricals `ticker`, `asset_class`, `region`, `sector` when available; known calendar categoricals `day_of_week` and `month`; plus numeric variables available in Gold passed as five-session lagged features. These include per-asset price/technical/return, volume, macroeconomic and sentiment inputs (`daily_return`, `log_return`, `volume_usd`, `daily_range`, `gap_open`, SMA/EMA, RSI, MACD, Bollinger width, ATR, 5/20/252-session return, volatility, 52-week high distance, rates/yields, CPI/M2/unemployment/claims/PMI, DXY/oil/VIX, and sentiment scores/counts). Global regime numeric inputs are also lagged five sessions: VIX level/change/percent changes/moving averages/distance/trend/252-session percentile; SPY 5/20/60/120/252-session returns, distances to SMA20/50/200, SMA50-vs-SMA200 trend, 20/60-session annualized volatility and its change; market breadth (20/252-session and above-SMA200); cross-asset mean return, volatility and 20-session return dispersion. Exact inclusion is dynamically filtered to columns present in the Gold frame.
 
@@ -413,11 +501,11 @@ Regime variables actually emitted by the training code include VIX levels/change
 
 ## 10. Exploratory Regime Tree
 
-The tree provided by the training artifact is summarized verbatim by run in `exploratory_tree_rules.md`. Mean importance across available runs is plotted in `regime_variable_importance.png` and saved as CSV: {'available' if has_importance else 'not available'}. The results suggest observed associations only; thresholds are exploratory and need validation on unseen data. They do not define an optimal regime or trading rule.
+The tree provided by the training artifact is preserved with warnings in `exploratory_tree_rules.md`. It is fitted over all folds in each run, not on one discovery fold for evaluation on the next. Trees from pre-v2 artifacts also use the misaligned origin fields. Its mean importance plot (`regime_variable_importance.png`) is therefore archival exploration, not validation evidence. Repaired per-prediction regime metrics are in `regime_analysis_summary.csv`; tree rules must be rebuilt from a discovery fold before forward testing.
 
 ## 11. Illustrative Strategy Analysis
 
-{'`illustrative_cumulative_return.png` compares long-if-prediction-exceeds-threshold and cash otherwise.' if has_backtest else 'No usable prediction date was available to construct the illustrative curve.'} The plot is labelled “Illustrative signal-based backtest”. Returns are five-session forward outcomes and can overlap. No transaction costs, slippage, sizing, intraday execution, or exposure limits are included; this is not definitive portfolio accounting.
+No cumulative return curve is generated from the available rows: they mix tickers, decoder leads, and overlapping five-session outcomes, while the artifacts do not define portfolio weights or a holding schedule. Compounding those rows sequentially would imply unstated position sizing and materially misrepresent portfolio performance.
 
 ## 12. Key Findings
 
@@ -441,7 +529,7 @@ The tree provided by the training artifact is summarized verbatim by run in `exp
 - Artifact retention is finite (the workflow sets 30 days); older runs cannot be recovered after expiration.
 - Artifacts are daily re-runs, and the same underlying validation dates and prediction observations can repeat. Pooled all-run metrics are not independent-sample estimates.
 - Training emits prediction-level files but no standalone fold-metric CSV; fold metrics here are reconstructed from those rows using the original formulas.
-- Rolling prediction observations can overlap in time and across five-day label horizons. Sharpe uses the training script's annualization convention and does not correct for dependence.
+- Rolling prediction observations can overlap in time and across five-day label horizons. The source Sharpe annualizes per-row strategy returns by √(252/5) but does not correct for overlapping observations, serial dependence, cross-ticker dependence, or portfolio weighting; treat it as the training script's descriptive metric, not an inferential portfolio Sharpe.
 - Regime splits/threshold analysis use available history and are exploratory; small N, repeated runs and multiple comparisons can make apparent extremes unstable.
 - Some artifact files may be absent; no missing values were imputed for analysis.
 
@@ -486,6 +574,11 @@ def main() -> int:
         print("Artifacts were found, but none contained a readable tft_prediction_level.csv.", file=sys.stderr)
         return 1
     raw = pd.concat(pred_parts, ignore_index=True, sort=False)
+    raw, origin_audit = repair_prediction_origins(raw)
+    origin_audit.to_csv(OUT / "origin_mapping_audit.csv", index=False)
+    if not origin_audit.empty:
+        print("Origin mapping audit:")
+        print(origin_audit.groupby("status", dropna=False)[["rows", "repaired_rows", "unmatched_rows"]].sum().to_string())
     meta_cols = [c for c in ["artifact_id", "artifact_name", "workflow_run_id", "created_at", "updated_at", "expires_at"] if c in raw]
     pred, mapping = normalize_predictions(raw)
     fold_table, run_table = construct_tables(pred, meta_cols)
@@ -512,6 +605,10 @@ def main() -> int:
     print("Generating threshold analysis...")
     threshold_table, thresholds, threshold_units = threshold_analysis(latest)
     has_backtest = backtest(latest, thresholds)
+    if not has_backtest:
+        (OUT / "illustrative_cumulative_return.png").unlink(missing_ok=True)
+    # Remove the old unqualified source-table name after it was explicitly marked legacy.
+    (OUT / "source_regime_analysis.csv").unlink(missing_ok=True)
     run_chart(run_table)
     write_report(repository, records, latest, fold_table, run_table, mapping, windows,
                  latest["_prediction"].corr(latest["_actual"]), metrics(latest)["r2"],

@@ -25,6 +25,12 @@ TFT_BASENAMES = {
     "tft_regime_tree_rules.txt",
     "tft_regime_tree_importance.csv",
 }
+CATBOOST_BASENAMES = {
+    "catboost_prediction_level.csv",
+    "catboost_regime_analysis.csv",
+    "catboost_regime_tree_rules.txt",
+    "catboost_regime_tree_importance.csv",
+}
 
 
 class GitHubArtifactError(RuntimeError):
@@ -134,6 +140,13 @@ def _is_tft_related(name: str, filenames: list[str]) -> bool:
     )
 
 
+def _is_catboost_related(name: str, filenames: list[str]) -> bool:
+    basenames = {PurePosixPath(item).name.lower() for item in filenames}
+    return bool(CATBOOST_BASENAMES & basenames) or (
+        "catboost" in name.lower() and any(".csv" in item.lower() for item in filenames)
+    )
+
+
 def read_artifact_contents(
     zip_buffer: io.BytesIO, metadata: dict[str, Any],
 ) -> dict[str, Any]:
@@ -162,15 +175,13 @@ def read_artifact_contents(
     return result
 
 
-def fetch_tft_artifacts(
-    repository: str | None = None, *, days: int = 30,
+def _fetch_artifacts_by_kind(
+    repository: str | None = None,
+    *,
+    days: int = 30,
     include_all_available: bool = False,
+    kind: str = "tft",
 ) -> tuple[str, list[dict[str, Any]]]:
-    """Find and read recent TFT artifacts; ZIPs are processed one at a time.
-
-    GitHub retains artifacts for 30 days in this repository. By default the
-    requested date window is applied, while include_all_available disables it.
-    """
     repository = repository or detect_repository()
     token = github_token()
     session = _session(token)
@@ -188,7 +199,8 @@ def fetch_tft_artifacts(
         zipped = download_artifact_zip(artifact, session=session)
         try:
             members = inspect_zip(zipped)
-            if not _is_tft_related(str(artifact.get("name", "")), members):
+            predicate = _is_tft_related if kind == "tft" else _is_catboost_related
+            if not predicate(str(artifact.get("name", "")), members):
                 continue
             record = read_artifact_contents(zipped, meta)
             record["members"] = members
@@ -199,6 +211,22 @@ def fetch_tft_artifacts(
             zipped.close()
     session.close()
     return repository, loaded
+
+
+def fetch_tft_artifacts(
+    repository: str | None = None, *, days: int = 30,
+    include_all_available: bool = False,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Find and read recent TFT artifacts; ZIPs are processed one at a time."""
+    return _fetch_artifacts_by_kind(repository, days=days, include_all_available=include_all_available, kind="tft")
+
+
+def fetch_catboost_artifacts(
+    repository: str | None = None, *, days: int = 30,
+    include_all_available: bool = False,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Find and read recent CatBoost-regression artifacts from GitHub Actions."""
+    return _fetch_artifacts_by_kind(repository, days=days, include_all_available=include_all_available, kind="catboost")
 
 
 def dataframe_for_basename(record: dict[str, Any], basename: str) -> pd.DataFrame | None:
