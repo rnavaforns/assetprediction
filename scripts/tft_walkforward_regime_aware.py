@@ -808,7 +808,7 @@ def build_prediction_level_dataframe(
         ]
         .drop_duplicates(["ticker", "time_idx"])
         .set_index(["ticker", "time_idx"])
-    )
+    )   
     for sample_idx in range(len(decoded)):
         ticker = str(decoded.loc[sample_idx, "ticker"])
         last_idx = int(

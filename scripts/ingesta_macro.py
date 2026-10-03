@@ -56,7 +56,6 @@ def ingesta_macro_incremental():
     if not fred_api_key:
         raise RuntimeError("FRED_API_KEY no encontrada en el archivo .env")
 
-    start_date = os.getenv("HISTORICAL_START_DATE", "2010-01-01")
     lookback_days = int(os.getenv("MACRO_INCREMENTAL_LOOKBACK_DAYS", "400"))
     release_cutoff = date.today() - timedelta(days=lookback_days)
     engine = get_db_engine()
@@ -87,12 +86,12 @@ def ingesta_macro_incremental():
     snapshots_by_indicator = {}
     try:
         for indicator_id, code in indicators:
-            snapshots = fetch_release_snapshots(fred, code, start_date)
-            snapshots_by_indicator[indicator_id] = [
-                snapshot
-                for snapshot in snapshots
-                if snapshot["release_date"] >= release_cutoff
-            ]
+            snapshots_by_indicator[indicator_id] = fetch_release_snapshots(
+                fred,
+                code,
+                release_cutoff.isoformat(),
+                include_boundary_snapshot=False,
+            )
             time.sleep(1.2)
 
         rows_written = 0

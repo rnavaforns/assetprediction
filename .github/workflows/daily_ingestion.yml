@@ -108,65 +108,65 @@ jobs:
     # # MODELOS DE REGRESIÓN (ESTUDIO DE ABLACIÓN)
     # # =========================================================================
 
-    # 11. Regresor Baseline (Split 80/20 simple, MSE Loss)
-    - name: Train Baseline XGBoost Regressor
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/train_xgboost.py
+    # # 11. Regresor Baseline (Split 80/20 simple, MSE Loss)
+    # - name: Train Baseline XGBoost Regressor
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/train_xgboost.py
 
-    # 12. Regresor Walk-Forward (CV con embargo de 5 días)
-    - name: Train XGBoost Walk-Forward Regressor
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/train_xgb_walkforward.py
+    # # 12. Regresor Walk-Forward (CV con embargo de 5 días)
+    # - name: Train XGBoost Walk-Forward Regressor
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/train_xgb_walkforward.py
 
-    # 13. Regresor Baseline con Pseudo-Huber Loss + Optuna
-    - name: Train XGBoost Regressor (Pseudo-Huber + Optuna)
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/train_xgboost_huber.py
+    # # 13. Regresor Baseline con Pseudo-Huber Loss + Optuna
+    # - name: Train XGBoost Regressor (Pseudo-Huber + Optuna)
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/train_xgboost_huber.py
 
-    # 14. Modelo Regresor con (Walk-Forward CV + Embargo + Pseudo-Huber + Optuna)
-    - name: Train XGBoost Walk-Forward Regressor (Pseudo-Huber + Optuna)
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/train_xgb_walkforward_huber.py
+    # # 14. Modelo Regresor con (Walk-Forward CV + Embargo + Pseudo-Huber + Optuna)
+    # - name: Train XGBoost Walk-Forward Regressor (Pseudo-Huber + Optuna)
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/train_xgb_walkforward_huber.py
 
-    # 15. Modelo regresor con (Walk-Forward CV + Embargo + Pseudo-Huber + Optuna) incluyendo variables temporales
-    - name: Train XGBoost Walk-Forward Regressor (Pseudo-Huber + Optuna) with time variables
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/train_xgb_walkforward_huber_time.py
+    # # 15. Modelo regresor con (Walk-Forward CV + Embargo + Pseudo-Huber + Optuna) incluyendo variables temporales
+    # - name: Train XGBoost Walk-Forward Regressor (Pseudo-Huber + Optuna) with time variables
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/train_xgb_walkforward_huber_time.py
 
-    # 16. Modelo CatBoost regresor con Walk-Forward + PseudoHuber + Optuna
-    - name: Train CatBoost Walk-Forward Regressor (Pseudo-Huber + Optuna)
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/catboost_regression.py
+    # # 16. Modelo CatBoost regresor con Walk-Forward + PseudoHuber + Optuna
+    # - name: Train CatBoost Walk-Forward Regressor (Pseudo-Huber + Optuna)
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/catboost_regression.py
 
-    # 17. Modelo TFT Regresor
-    - name: Train Temporal Fusion Transformer (TFT) Regressor
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/train_tft.py
+    # # 17. Modelo TFT Regresor
+    # - name: Train Temporal Fusion Transformer (TFT) Regressor
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/train_tft.py
 
-    #18. Modelo TFT Regresor con WalkForward
-    - name: Train Temporal Fusion Transformer (TFT) with WalkForward
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/train_tft_walkforward.py
+    # #18. Modelo TFT Regresor con WalkForward
+    # - name: Train Temporal Fusion Transformer (TFT) with WalkForward
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/train_tft_walkforward.py
 
-    # 19. Modelo CatBoost regresor con Walk-Forward + PseudoHuber + Optuna + GARCH
-    - name: Train CatBoost Walk-Forward Regressor (Pseudo-Huber + Optuna + GARCH)
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/catboost_garch_regression.py
+    # # 19. Modelo CatBoost regresor con Walk-Forward + PseudoHuber + Optuna + GARCH
+    # - name: Train CatBoost Walk-Forward Regressor (Pseudo-Huber + Optuna + GARCH)
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/catboost_garch_regression.py
 
-    # 20. Modelo regresor con (Walk-Forward CV + Embargo + Pseudo-Huber + Optuna) incluyendo variables temporales + GARCH
-    - name: Train XGBoost Walk-Forward Regressor (Pseudo-Huber + Optuna + GARCH)
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/train_xgb_walkforward_huber_time_garch.py
+    # # 20. Modelo regresor con (Walk-Forward CV + Embargo + Pseudo-Huber + Optuna) incluyendo variables temporales + GARCH
+    # - name: Train XGBoost Walk-Forward Regressor (Pseudo-Huber + Optuna + GARCH)
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/train_xgb_walkforward_huber_time_garch.py
 
     # 21. TFT con análisis de momento de mercado
     - name: Train TFT con análisis de régimen de mercado
@@ -197,24 +197,24 @@ jobs:
         if-no-files-found: warn
         retention-days: 30
 
-    # =========================================================================
-    # MODELOS DE CLASIFICACIÓN (DIRECCIONAL SUBE/BAJA)
-    # =========================================================================
+    # # =========================================================================
+    # # MODELOS DE CLASIFICACIÓN (DIRECCIONAL SUBE/BAJA)
+    # # =========================================================================
 
-    # 22. Clasificador Baseline (Split 80/20 simple)
-    - name: Train Baseline XGBoost Classifier
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/train_xgb_classifier.py
+    # # 22. Clasificador Baseline (Split 80/20 simple)
+    # - name: Train Baseline XGBoost Classifier
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/train_xgb_classifier.py
 
-    # 23. Clasificador Avanzado (Walk-Forward CV + Embargo + Optuna)
-    - name: Train XGBoost Walk-Forward Classifier (Optuna)
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/train_xgb_walkforward_classifier.py
+    # # 23. Clasificador Avanzado (Walk-Forward CV + Embargo + Optuna)
+    # - name: Train XGBoost Walk-Forward Classifier (Optuna)
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/train_xgb_walkforward_classifier.py
 
-    # 24. Clasificador CatBoost (Walk-Forward CV + Embargo + Optuna)
-    - name: Train CatBoost Walk-Forward Classifier (Optuna)
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/catboost_classification.py
+    # # 24. Clasificador CatBoost (Walk-Forward CV + Embargo + Optuna)
+    # - name: Train CatBoost Walk-Forward Classifier (Optuna)
+    #   env:
+    #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+    #   run: python scripts/catboost_classification.py

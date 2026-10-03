@@ -31,6 +31,7 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+MACRO_INSERT_BATCH_SIZE = 250
 
 
 def get_db_engine():
@@ -42,6 +43,56 @@ def get_db_engine():
         f"/{os.getenv('SUPABASE_DB_NAME')}"
     )
     return create_engine(connection_string)
+
+
+def _upsert_macro_snapshots(conn, indicator_id, code, snapshots):
+    """Write snapshots in multi-row statements and report batch progress."""
+    total = len(snapshots)
+    rows_written = 0
+
+    for batch_start in range(0, total, MACRO_INSERT_BATCH_SIZE):
+        batch = snapshots[batch_start : batch_start + MACRO_INSERT_BATCH_SIZE]
+        placeholders = []
+        params = {}
+
+        for row_index, snapshot in enumerate(batch):
+            prefix = f"row_{row_index}"
+            placeholders.append(
+                f"(:{prefix}_indicator_id, :{prefix}_release_date, "
+                f":{prefix}_reference_period, :{prefix}_value)"
+            )
+            params.update(
+                {
+                    f"{prefix}_indicator_id": indicator_id,
+                    f"{prefix}_release_date": snapshot["release_date"],
+                    f"{prefix}_reference_period": snapshot["reference_period"],
+                    f"{prefix}_value": snapshot["value"],
+                }
+            )
+
+        insert_query = text(
+            """
+            INSERT INTO bronze.macro_data
+                (indicator_id, release_date, reference_period, value)
+            VALUES
+            """
+            + ", ".join(placeholders)
+            + """
+            ON CONFLICT (indicator_id, release_date) DO UPDATE SET
+                reference_period = EXCLUDED.reference_period,
+                value = EXCLUDED.value;
+            """
+        )
+        conn.execute(insert_query, params)
+        rows_written += len(batch)
+        logger.info(
+            "%s: insertados %s/%s snapshots Bronze.",
+            code,
+            f"{rows_written:,}",
+            f"{total:,}",
+        )
+
+    return rows_written
 
 
 def cargar_historico_macro(start_date: str, replace_existing: bool = False):
@@ -106,26 +157,14 @@ def cargar_historico_macro(start_date: str, replace_existing: bool = False):
                     {"indicator_id": indicator_id},
                 )
 
-        insert_query = text(
-            """
-            INSERT INTO bronze.macro_data
-                (indicator_id, release_date, reference_period, value)
-            VALUES
-                (:indicator_id, :release_date, :reference_period, :value)
-            ON CONFLICT (indicator_id, release_date) DO UPDATE SET
-                reference_period = EXCLUDED.reference_period,
-                value = EXCLUDED.value;
-            """
-        )
         rows_written = 0
-        for indicator_id, _ in indicators:
-            rows = [
-                {"indicator_id": indicator_id, **snapshot}
-                for snapshot in snapshots_by_indicator[indicator_id]
-            ]
-            if rows:
-                conn.execute(insert_query, rows)
-                rows_written += len(rows)
+        for indicator_id, code in indicators:
+            rows_written += _upsert_macro_snapshots(
+                conn,
+                indicator_id,
+                code,
+                snapshots_by_indicator[indicator_id],
+            )
 
     logger.info(
         "Backfill macro Bronze completado: %s snapshots%s.",
