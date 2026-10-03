@@ -5,12 +5,11 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import torch
+import joblib
 try:
     import lightning.pytorch as pl
-    from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 except ImportError:
     import pytorch_lightning as pl
-    from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_forecasting import TimeSeriesDataSet, TemporalFusionTransformer
 from pytorch_forecasting.metrics import QuantileLoss
 from pytorch_forecasting.data import GroupNormalizer
@@ -26,6 +25,18 @@ try:
     from walkforward_folds import annual_expanding_folds
 except ModuleNotFoundError:
     from scripts.walkforward_folds import annual_expanding_folds
+try:
+    from regime_cross_validation import (
+        cross_window_tree_validation,
+        summarize_prediction_window,
+        summarize_training_regime_profile,
+    )
+except ModuleNotFoundError:
+    from scripts.regime_cross_validation import (
+        cross_window_tree_validation,
+        summarize_prediction_window,
+        summarize_training_regime_profile,
+    )
 warnings.filterwarnings("ignore")
 load_dotenv()
 # ============================================================
@@ -92,6 +103,14 @@ CONFIG = {
     "parquet_path": "data/gold_dataset.parquet",
     "prediction_csv": "data/tft_prediction_level.csv",
     "fold_metrics_csv": "data/tft_walkforward_fold_metrics.csv",
+    "cross_window_prediction_parquet": "data/tft_cross_window_predictions.parquet",
+    "cross_window_metrics_csv": "data/tft_cross_window_metrics.csv",
+    "training_regime_profile_csv": "data/tft_vintage_training_regime_profile.csv",
+    "cross_window_tree_metrics_csv": "data/tft_cross_window_tree_metrics.csv",
+    "cross_window_tree_rules_txt": "data/tft_cross_window_tree_rules.txt",
+    "cross_window_tree_importance_csv": "data/tft_cross_window_tree_importance.csv",
+    "cross_window_tree_bundle": "data/tft_cross_window_tree_bundle.joblib",
+    "vintage_model_dir": "data/tft_model_vintages",
     "regime_csv": "data/tft_regime_analysis.csv",
     "tree_rules_txt": "data/tft_regime_tree_rules.txt",
     "tree_importance_csv": "data/tft_regime_tree_importance.csv",
@@ -740,6 +759,49 @@ def build_fold_datasets(
         validation_data,
     )
 
+
+def build_vintage_validation_dataset(
+    df: pd.DataFrame,
+    training_data: TimeSeriesDataSet,
+    trained_tickers: set[str],
+    validation_start_date: pd.Timestamp,
+    validation_end_date: pd.Timestamp,
+):
+    """Make a later test window using transforms fitted by a frozen vintage."""
+    val_frames = []
+    for ticker, ticker_df in df.groupby("ticker", sort=False):
+        if str(ticker) not in trained_tickers:
+            continue
+        ticker_df = ticker_df.sort_values("trade_date")
+        context = ticker_df[
+            ticker_df["trade_date"] < validation_start_date
+        ].tail(CONFIG["max_encoder_length"])
+        targets = ticker_df[
+            (ticker_df["trade_date"] >= validation_start_date)
+            & (ticker_df["trade_date"] <= validation_end_date)
+        ]
+        if len(context) >= CONFIG["max_encoder_length"] and not targets.empty:
+            val_frames.append(pd.concat([context, targets], ignore_index=False))
+
+    df_val = (
+        pd.concat(val_frames, ignore_index=True)
+        if val_frames
+        else df.iloc[0:0].copy()
+    )
+    df_val = df_val.drop(columns=["target_end_date"], errors="ignore")
+    if df_val.empty:
+        raise ValueError(
+            "Vintage sin datos para la ventana de prueba "
+            f"{validation_start_date.date()}–{validation_end_date.date()}."
+        )
+    validation_data = TimeSeriesDataSet.from_dataset(
+        training_data,
+        df_val,
+        predict=False,
+        stop_randomization=True,
+    )
+    return df_val, validation_data
+
 # ============================================================
 # PREDICCIONES A NIVEL DE MUESTRA
 # ============================================================
@@ -1217,247 +1279,216 @@ def main():
     })
     fold_results = []
     prediction_frames = []
+    cross_prediction_frames = []
+    cross_window_metrics = []
+    training_regime_profiles = []
+    vintage_model_paths = []
+    os.makedirs(CONFIG["vintage_model_dir"], exist_ok=True)
     print("\n==================================================")
     print(
-        f" WALK-FORWARD EXPANSIVO: {n_folds} folds anuales "
+        f" WALK-FORWARD CRUZADO: {n_folds} vintages "
         f"({fold_specs[0]['year']}–{fold_specs[-1]['year']})"
     )
+    print("Cada modelo se congela y se prueba en su año inicial y los posteriores.")
     print("==================================================")
+
     for fold in range(n_folds):
-        print("\n==================================================")
-        print(
-            f"               EJECUTANDO FOLD {fold + 1}/{n_folds}"
-        )
-        print("==================================================")
         fold_spec = fold_specs[fold]
+        vintage_year = fold_spec["year"]
         validation_start_date = fold_spec["validation_start_date"]
         validation_end_date = fold_spec["validation_end_date"]
-        print(
-            f"  • Año / validation    : {fold_spec['year']} | "
-            f"{validation_start_date.date()} -> "
-            f"{validation_end_date.date()}"
-        )
-        print(
-            f"  • Última fecha train  : "
-            f"{fold_spec['train_last_date'].date()}"
-        )
         (
             df_train,
             df_val,
             training_data,
-            validation_data,
+            first_validation_data,
         ) = build_fold_datasets(
             df=df,
             known_reals=known_reals,
             validation_start_date=validation_start_date,
             validation_end_date=validation_end_date,
         )
-        print(
-            f"  • Filas train: {len(df_train)}"
+        train_last_target_end = df.loc[
+            df["target_end_date"] < validation_start_date,
+            "target_end_date",
+        ].max()
+        training_regime_profiles.append(
+            summarize_training_regime_profile(
+                df_train,
+                [
+                    feature.removeprefix("origin_")
+                    for feature in REGIME_FEATURES_FOR_ANALYSIS
+                ],
+                market_ticker=CONFIG["market_ticker"],
+                metadata={
+                    "model_vintage_fold": fold + 1,
+                    "model_vintage_year": vintage_year,
+                    "model_train_cutoff_date": train_last_target_end,
+                },
+            )
         )
         print(
-            f"  • Filas val/context: {len(df_val)}"
+            f"\n========== VINTAGE {fold + 1} · primera prueba {vintage_year} =========="
         )
         print(
-            f"  • Samples train: {len(training_data)}"
+            f"Train hasta {train_last_target_end.date()} | "
+            f"filas train {len(df_train):,} | "
+            f"muestras TFT {len(training_data):,}"
         )
-        print(
-            f"  • Samples val: {len(validation_data)}"
-        )
+
         train_dataloader = training_data.to_dataloader(
             train=True,
             batch_size=CONFIG["batch_size"],
             num_workers=0,
         )
-        val_dataloader = validation_data.to_dataloader(
-            train=False,
-            batch_size=CONFIG["batch_size"] * 2,
-            num_workers=0,
-        )
-        pl.seed_everything(
-            CONFIG["random_state"] + fold,
-            workers=True,
-        )
-        tft = TemporalFusionTransformer.from_dataset(
+        pl.seed_everything(CONFIG["random_state"] + fold, workers=True)
+        vintage_model = TemporalFusionTransformer.from_dataset(
             training_data,
             learning_rate=CONFIG["learning_rate"],
             hidden_size=CONFIG["hidden_size"],
             attention_head_size=CONFIG["attention_head_size"],
             dropout=CONFIG["dropout"],
             loss=QuantileLoss(),
-            reduce_on_plateau_patience=3,
+            reduce_on_plateau_patience=None,
         )
-        early_stop_callback = EarlyStopping(
-            monitor="val_loss",
-            min_delta=1e-4,
-            patience=4,
-            verbose=False,
-            mode="min",
-        )
-        checkpoint_callback = ModelCheckpoint(
-            monitor="val_loss",
-            filename=(
-                f"best-tft-fold{fold + 1}-{{epoch:02d}}"
-            ),
-            mode="min",
-        )
+        # La validación externa no interviene en early stopping ni en la
+        # selección de época. Se usa un número fijo de épocas por vintage.
         trainer = pl.Trainer(
             max_epochs=CONFIG["max_epochs"],
             accelerator="cpu",
             devices=1,
             gradient_clip_val=0.1,
-            callbacks=[
-                early_stop_callback,
-                checkpoint_callback,
-            ],
+            callbacks=[],
             logger=False,
+            enable_checkpointing=False,
             enable_progress_bar=True,
         )
-        trainer.fit(
-            tft,
-            train_dataloader,
-            val_dataloader,
+        trainer.fit(vintage_model, train_dataloader)
+        model_path = os.path.join(
+            CONFIG["vintage_model_dir"],
+            f"tft_vintage_{fold + 1:02d}_train_through_"
+            f"{train_last_target_end:%Y%m%d}.ckpt",
         )
-        best_model_path = checkpoint_callback.best_model_path
-        if not best_model_path:
-            raise RuntimeError(
-                f"Fold {fold + 1}: no se encontró checkpoint."
-            )
-        best_tft = TemporalFusionTransformer.load_from_checkpoint(
-            best_model_path
-        )
-        # ----------------------------------------------------
-        # PREDICCIONES
-        # ----------------------------------------------------
-        raw_predictions = best_tft.predict(
-            val_dataloader,
-            mode="prediction",
-            return_y=True,
-        )
-        prediction_df = build_prediction_level_dataframe(
-            raw_predictions=raw_predictions,
-            validation_data=validation_data,
-            full_df=df,
-            fold=fold + 1,
-        )
-        prediction_df["validation_year"] = fold_spec["year"]
-        prediction_frames.append(
-            prediction_df
-        )
-        metrics = calculate_prediction_metrics(
-            prediction_df
-        )
-        print(
-            "\n✔ Fold "
-            f"{fold + 1} Finalizado -> "
-            f"MAE: {metrics['mae']:.4f} | "
-            f"RMSE: {metrics['rmse']:.4f} | "
-            f"R2: {metrics['r2']:.4f}"
-        )
-        print(
-            "  Finanzas -> "
-            f"Hit Rate: {metrics['hit_rate']:.2%} | "
-            f"Sharpe L/S: {metrics['sharpe_long_short']:.2f} | "
-            f"Sharpe Long-only: {metrics['sharpe_long_only']:.2f} | "
-            f"Precision señales >0: "
-            f"{metrics['positive_signal_precision']:.2%} | "
-            f"Cobertura señales >0: "
-            f"{metrics['positive_signal_coverage']:.2%}"
-        )
-        # ----------------------------------------------------
-        # RÉGIMEN VIX > 20 usando SOLO el ORIGEN
-        # ----------------------------------------------------
-        origin_vix = (
-            prediction_df["origin_vix_market"]
-            if "origin_vix_market" in prediction_df.columns
-            else pd.Series(dtype=float)
-        )
-        if len(origin_vix) > 0:
-            mask = origin_vix.notna() & (origin_vix > 20)
-            if mask.sum() > 0:
-                hit_high_vix = (
-                    prediction_df.loc[mask, "hit"]
-                    .mean()
-                )
+        trainer.save_checkpoint(model_path)
+        vintage_model_paths.append(model_path)
+        trained_tickers = set(df_train["ticker"].astype(str).unique())
+
+        for evaluation_spec in fold_specs[fold:]:
+            evaluation_year = evaluation_spec["year"]
+            if evaluation_year == vintage_year:
+                evaluation_data = first_validation_data
             else:
-                hit_high_vix = np.nan
-        else:
-            hit_high_vix = np.nan
-        print(
-            "  Regimen -> "
-            f"Hit Rate VIX>20 (en origen): "
-            f"{hit_high_vix:.2%}"
-            if not np.isnan(hit_high_vix)
-            else
-            "  Regimen -> Hit Rate VIX>20: NaN"
-        )
-        wandb.log({
-            f"fold_{fold + 1}_mae": metrics["mae"],
-            f"fold_{fold + 1}_rmse": metrics["rmse"],
-            f"fold_{fold + 1}_r2": metrics["r2"],
-            f"fold_{fold + 1}_hit_rate": metrics["hit_rate"],
-            f"fold_{fold + 1}_sharpe_long_short": metrics[
-                "sharpe_long_short"
-            ],
-            f"fold_{fold + 1}_sharpe_long_only": metrics[
-                "sharpe_long_only"
-            ],
-            f"fold_{fold + 1}_positive_signal_precision": metrics[
-                "positive_signal_precision"
-            ],
-            f"fold_{fold + 1}_positive_signal_coverage": metrics[
-                "positive_signal_coverage"
-            ],
-            f"fold_{fold + 1}_hit_rate_vix_gt_20": hit_high_vix,
-        })
-        fold_results.append({
-            "fold": fold + 1,
-            "validation_year": fold_spec["year"],
-            "validation_start_date": validation_start_date,
-            "validation_end_date": validation_end_date,
-            "train_last_date": fold_spec["train_last_date"],
-            "latest_train_label_end_date": df.loc[
-                df["target_end_date"] < validation_start_date,
-                "target_end_date",
-            ].max(),
-            "mae": metrics["mae"],
-            "rmse": metrics["rmse"],
-            "r2": metrics["r2"],
-            "hit_rate": metrics["hit_rate"],
-            "sharpe_long_short": metrics[
-                "sharpe_long_short"
-            ],
-            "sharpe_long_only": metrics[
-                "sharpe_long_only"
-            ],
-            "positive_signal_precision": metrics[
-                "positive_signal_precision"
-            ],
-            "positive_signal_coverage": metrics[
-                "positive_signal_coverage"
-            ],
-            "hit_rate_vix_gt_20": hit_high_vix,
-            "model_path": best_model_path,
-        })
-        # ----------------------------------------------------
-        # INTERPRETABILIDAD
-        # ----------------------------------------------------
-        log_tft_interpretability(
-            best_tft,
-            val_dataloader,
-            fold + 1,
-        )
-        # ----------------------------------------------------
-        # MEMORY
-        # ----------------------------------------------------
+                _, evaluation_data = build_vintage_validation_dataset(
+                    df=df,
+                    training_data=training_data,
+                    trained_tickers=trained_tickers,
+                    validation_start_date=evaluation_spec[
+                        "validation_start_date"
+                    ],
+                    validation_end_date=evaluation_spec[
+                        "validation_end_date"
+                    ],
+                )
+            evaluation_dataloader = evaluation_data.to_dataloader(
+                train=False,
+                batch_size=CONFIG["batch_size"] * 2,
+                num_workers=0,
+            )
+            raw_predictions = vintage_model.predict(
+                evaluation_dataloader,
+                mode="prediction",
+                return_y=True,
+            )
+            prediction_df = build_prediction_level_dataframe(
+                raw_predictions=raw_predictions,
+                validation_data=evaluation_data,
+                full_df=df,
+                fold=fold + 1,
+            )
+            prediction_df["validation_year"] = evaluation_year
+            prediction_df["evaluation_year"] = evaluation_year
+            prediction_df["model_vintage_fold"] = fold + 1
+            prediction_df["model_vintage_year"] = vintage_year
+            prediction_df["model_train_cutoff_date"] = train_last_target_end
+            prediction_df["tree_discovery_year"] = vintage_year
+            cross_prediction_frames.append(prediction_df)
+
+            cross_window_metrics.append({
+                "model_vintage_fold": fold + 1,
+                "model_vintage_year": vintage_year,
+                "model_train_cutoff_date": train_last_target_end,
+                "evaluation_year": evaluation_year,
+                **summarize_prediction_window(prediction_df),
+            })
+
+            if evaluation_year == vintage_year:
+                prediction_frames.append(prediction_df)
+                metrics = calculate_prediction_metrics(prediction_df)
+                print(
+                    f"  Diagonal {evaluation_year}: "
+                    f"Hit {metrics['hit_rate']:.2%} | "
+                    f"Sharpe L/O {metrics['sharpe_long_only']:.2f} | "
+                    f"{len(prediction_df):,} predicciones"
+                )
+                origin_vix = prediction_df.get(
+                    "origin_vix_market", pd.Series(dtype=float)
+                )
+                vix_mask = origin_vix.notna() & (origin_vix > 20)
+                hit_high_vix = (
+                    float(prediction_df.loc[vix_mask, "hit"].mean())
+                    if vix_mask.any()
+                    else np.nan
+                )
+                wandb.log({
+                    f"fold_{fold + 1}_mae": metrics["mae"],
+                    f"fold_{fold + 1}_rmse": metrics["rmse"],
+                    f"fold_{fold + 1}_r2": metrics["r2"],
+                    f"fold_{fold + 1}_hit_rate": metrics["hit_rate"],
+                    f"fold_{fold + 1}_sharpe_long_short": metrics[
+                        "sharpe_long_short"
+                    ],
+                    f"fold_{fold + 1}_sharpe_long_only": metrics[
+                        "sharpe_long_only"
+                    ],
+                    f"fold_{fold + 1}_positive_signal_precision": metrics[
+                        "positive_signal_precision"
+                    ],
+                    f"fold_{fold + 1}_positive_signal_coverage": metrics[
+                        "positive_signal_coverage"
+                    ],
+                    f"fold_{fold + 1}_hit_rate_vix_gt_20": hit_high_vix,
+                })
+                fold_results.append({
+                    "fold": fold + 1,
+                    "validation_year": evaluation_year,
+                    "validation_start_date": evaluation_spec[
+                        "validation_start_date"
+                    ],
+                    "validation_end_date": evaluation_spec[
+                        "validation_end_date"
+                    ],
+                    "train_last_date": fold_spec["train_last_date"],
+                    "latest_train_label_end_date": train_last_target_end,
+                    **metrics,
+                    "hit_rate_vix_gt_20": hit_high_vix,
+                    "model_path": model_path,
+                })
+                log_tft_interpretability(
+                    vintage_model,
+                    evaluation_dataloader,
+                    fold + 1,
+                )
+            if evaluation_data is not first_validation_data:
+                del evaluation_data
+            del evaluation_dataloader
+            gc.collect()
+
         del (
-            tft,
-            best_tft,
+            vintage_model,
             trainer,
             train_dataloader,
-            val_dataloader,
             training_data,
-            validation_data,
+            first_validation_data,
         )
         gc.collect()
     # ========================================================
@@ -1476,6 +1507,77 @@ def main():
     all_predictions.to_csv(
         CONFIG["prediction_csv"],
         index=False,
+    )
+    cross_predictions = pd.concat(
+        cross_prediction_frames,
+        ignore_index=True,
+    )
+    cross_predictions.to_parquet(
+        CONFIG["cross_window_prediction_parquet"],
+        index=False,
+    )
+    cross_metrics = pd.DataFrame(cross_window_metrics)
+    cross_metrics.to_csv(
+        CONFIG["cross_window_metrics_csv"],
+        index=False,
+    )
+    nonempty_training_profiles = [
+        profile for profile in training_regime_profiles if not profile.empty
+    ]
+    training_profile_df = (
+        pd.concat(nonempty_training_profiles, ignore_index=True)
+        if nonempty_training_profiles
+        else pd.DataFrame()
+    )
+    training_profile_df.to_csv(
+        CONFIG["training_regime_profile_csv"],
+        index=False,
+    )
+    (
+        tree_validation_metrics,
+        tree_bundle,
+        tree_rules,
+        tree_importance,
+    ) = cross_window_tree_validation(
+        cross_predictions,
+        REGIME_FEATURES_FOR_ANALYSIS,
+        random_state=CONFIG["random_state"],
+    )
+    for vintage_key, tree_spec in tree_bundle.items():
+        model_index = int(vintage_key) - 1
+        if 0 <= model_index < len(vintage_model_paths):
+            tree_spec["base_model_path"] = vintage_model_paths[model_index]
+    tree_validation_metrics.to_csv(
+        CONFIG["cross_window_tree_metrics_csv"],
+        index=False,
+    )
+    tree_importance.to_csv(
+        CONFIG["cross_window_tree_importance_csv"],
+        index=False,
+    )
+    with open(
+        CONFIG["cross_window_tree_rules_txt"],
+        "w",
+        encoding="utf-8",
+    ) as rules_file:
+        rules_file.write(
+            "ÁRBOLES DE RÉGIMEN POR VINTAGE TFT\n"
+            "Cada árbol se ajusta en la primera ventana OOS de su vintage y "
+            "se evalúa solo en años posteriores.\n\n"
+        )
+        rules_file.write(tree_rules)
+    joblib.dump(tree_bundle, CONFIG["cross_window_tree_bundle"])
+    print(
+        f"✔ Matriz de predicciones modelo-vintage × ventana: "
+        f"{CONFIG['cross_window_prediction_parquet']}"
+    )
+    print(
+        f"✔ Métricas de árboles en ventanas futuras: "
+        f"{CONFIG['cross_window_tree_metrics_csv']}"
+    )
+    print(
+        f"✔ Perfiles de regímenes de entrenamiento: "
+        f"{CONFIG['training_regime_profile_csv']}"
     )
     print(
         f"\n✔ Dataset de predicciones guardado en: "
@@ -1570,6 +1672,13 @@ def main():
     files_to_add = [
         CONFIG["prediction_csv"],
         CONFIG["fold_metrics_csv"],
+        CONFIG["cross_window_prediction_parquet"],
+        CONFIG["cross_window_metrics_csv"],
+        CONFIG["training_regime_profile_csv"],
+        CONFIG["cross_window_tree_metrics_csv"],
+        CONFIG["cross_window_tree_rules_txt"],
+        CONFIG["cross_window_tree_importance_csv"],
+        CONFIG["cross_window_tree_bundle"],
         CONFIG["regime_csv"],
         CONFIG["tree_rules_txt"],
         CONFIG["tree_importance_csv"],
@@ -1577,6 +1686,9 @@ def main():
     for path in files_to_add:
         if os.path.exists(path):
             artifact.add_file(path)
+    for model_path in vintage_model_paths:
+        if os.path.exists(model_path):
+            artifact.add_file(model_path)
     wandb.log_artifact(artifact)
     wandb.finish()
     print("\n✔ Proceso completado.")
