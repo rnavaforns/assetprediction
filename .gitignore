@@ -1,11 +1,16 @@
 .env
 .venv/
 wandb/
-analytics/
 xgb_model.json
 data/
+analysis/
+__pycache__/
+*.csv
+*.txt
+!requirements.txt
 *.png
 *.tsv
 *.tfevents
 *.json
 *.cbm
+*.ckpt
