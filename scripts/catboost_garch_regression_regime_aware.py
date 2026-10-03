@@ -10,12 +10,15 @@ import matplotlib.pyplot as plt
 
 from catboost import CatBoostRegressor, Pool
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.model_selection import TimeSeriesSplit
 from sklearn.tree import DecisionTreeClassifier, export_text
 from dotenv import load_dotenv
 import wandb
 import optuna
 import shap
+try:
+    from walkforward_folds import annual_expanding_folds
+except ModuleNotFoundError:
+    from scripts.walkforward_folds import annual_expanding_folds
 
 try:
     from arch import arch_model
@@ -29,15 +32,20 @@ load_dotenv()
 
 CONFIG = {
     'model_type': 'CatBoostRegressor_WalkForward_RegimeAware',
-    'n_splits': 5,
     'horizon': 5,
-    'embargo_days': 5,
     'optuna_trials': 15,
     'random_state': 42,
-    'start_date': '2021-01-01',
+    'start_date': os.getenv('WALK_FORWARD_START_DATE', '2011-01-01'),
+    'first_validation_year': int(
+        os.getenv('WALK_FORWARD_FIRST_VALIDATION_YEAR', '2016')
+    ),
+    'minimum_train_years': 4,
+    'tuning_years': 3,
+    'tuning_minimum_train_years': 2,
     'market_ticker': 'SPY',
     'parquet_path': 'data/gold_dataset.parquet',
     'prediction_csv': 'data/catboost_prediction_level.csv',
+    'fold_metrics_csv': 'data/catboost_walkforward_fold_metrics.csv',
     'regime_csv': 'data/catboost_regime_analysis.csv',
     'tree_rules_txt': 'data/catboost_regime_tree_rules.txt',
     'tree_importance_csv': 'data/catboost_regime_tree_importance.csv',
@@ -63,9 +71,16 @@ def load_data(path):
     if not os.path.exists(path):
         raise FileNotFoundError(path)
     df = pd.read_parquet(path).copy()
+    df['trade_date'] = pd.to_datetime(df['trade_date'])
+    df['ticker'] = df['ticker'].astype(str)
+    df = df.sort_values(['ticker', 'trade_date']).reset_index(drop=True)
+    # Preserve the true end date of each five-session label before filtering
+    # outliers or missing labels, so the fold purge respects ticker calendars.
+    df['target_end_date'] = df.groupby('ticker')['trade_date'].shift(
+        CONFIG['horizon']
+    )
     if 'is_outlier' in df.columns:
         df = df[df['is_outlier'] == False].copy()
-    df['trade_date'] = pd.to_datetime(df['trade_date'])
     df['forward_return_5d'] = pd.to_numeric(df['forward_return_5d'], errors='coerce')
     df = df[df['forward_return_5d'].notna()].copy()
     df = df[df['trade_date'] >= pd.Timestamp(CONFIG['start_date'])].copy()
@@ -197,7 +212,10 @@ def add_rolling_garch_features(df_train, df_test):
 
 
 def prepare_base_features(df):
-    drop = ['asset_key', 'trade_date', 'forward_return_5d', 'is_outlier', 'dr', 'r20', 'r252']
+    drop = [
+        'asset_key', 'trade_date', 'target_end_date', 'forward_return_5d',
+        'is_outlier', 'dr', 'r20', 'r252',
+    ]
     X = df.drop(columns=drop, errors='ignore').copy()
     y = df.forward_return_5d.astype(float)
     cat_idx = []
@@ -240,11 +258,14 @@ def metrics(y_true, y_pred, X):
     }
 
 
-def prediction_frame(X_test, y_test, y_pred, fold):
+def prediction_frame(
+    X_test, y_test, y_pred, fold, validation_year, metadata
+):
     out = pd.DataFrame({
         'fold': fold,
-        'ticker': X_test.ticker.astype(str).to_numpy() if 'ticker' in X_test else '',
-        'prediction_date': X_test.trade_date.to_numpy() if 'trade_date' in X_test else pd.NaT,
+        'validation_year': validation_year,
+        'ticker': metadata['ticker'].astype(str).to_numpy(),
+        'prediction_date': pd.to_datetime(metadata['trade_date']).to_numpy(),
         'y_true': np.asarray(y_test), 'y_pred': np.asarray(y_pred),
     })
     out['hit'] = (np.sign(out.y_true) == np.sign(out.y_pred)).astype(int)
@@ -295,6 +316,50 @@ def explore_regime_tree(preds):
     return tree
 
 
+def prepare_fold_data(df, X_base, y, fold_spec):
+    """Build a purged expanding train set and the calendar-year test set."""
+    validation_start = fold_spec['validation_start_date']
+    validation_end = fold_spec['validation_end_date']
+
+    train_history_mask = df['trade_date'] < validation_start
+    train_mask = (
+        train_history_mask
+        & df['target_end_date'].notna()
+        & (df['target_end_date'] < validation_start)
+    )
+    test_mask = df['trade_date'].between(validation_start, validation_end)
+    if not train_mask.any():
+        raise ValueError(f"Fold {fold_spec['year']}: train vacío tras purgar labels.")
+    if not test_mask.any():
+        raise ValueError(f"Fold {fold_spec['year']}: test anual vacío.")
+
+    df_train_history = df.loc[train_history_mask].copy()
+    df_test = df.loc[test_mask].copy()
+    garch_train_history, garch_test = add_rolling_garch_features(
+        df_train_history,
+        df_test,
+    )
+
+    X_train = X_base.loc[train_mask].copy()
+    y_train = y.loc[train_mask].copy()
+    X_test = X_base.loc[test_mask].copy()
+    y_test = y.loc[test_mask].copy()
+
+    # Fit the GARCH feature from every observable pre-validation return, while
+    # training labels still obey the stricter target-end-date purge.
+    garch_train_for_labels = garch_train_history.loc[X_train.index]
+    X_train['garch_volatility'] = garch_train_for_labels[
+        'garch_volatility'
+    ].to_numpy()
+    X_train['garch_variance'] = garch_train_for_labels[
+        'garch_variance'
+    ].to_numpy()
+    X_test['garch_volatility'] = garch_test['garch_volatility'].to_numpy()
+    X_test['garch_variance'] = garch_test['garch_variance'].to_numpy()
+
+    return X_train, y_train, X_test, y_test, df.loc[train_mask], df_test
+
+
 def main():
     stamp = datetime.now().strftime('%Y-%m-%d-%H%M%S')
     wandb.init(project='tfm-market-prediction', name=f'catboost-regime-wf-{stamp}', group='regime_analysis', tags=['catboost','walk-forward','regime-analysis','leakage-safe','optuna'], config=CONFIG)
@@ -305,26 +370,49 @@ def main():
     for c in global_regimes.columns:
         if c != 'trade_date': df[c] = df[c].ffill()
     X_base, y, cat_idx = prepare_base_features(df)
-    dates = np.sort(df.trade_date.unique())
-    tscv = TimeSeriesSplit(n_splits=CONFIG['n_splits'])
+    market_dates = pd.DatetimeIndex(
+        df.loc[
+            df['ticker'].astype(str) == CONFIG['market_ticker'],
+            'trade_date',
+        ].drop_duplicates().sort_values()
+    )
+    validation_folds = annual_expanding_folds(
+        market_dates,
+        first_validation_year=CONFIG['first_validation_year'],
+        minimum_train_years=CONFIG['minimum_train_years'],
+    )
+    tuning_first_year = (
+        CONFIG['first_validation_year'] - CONFIG['tuning_years']
+    )
+    tuning_last_year = CONFIG['first_validation_year'] - 1
+    tuning_folds = annual_expanding_folds(
+        market_dates,
+        first_validation_year=tuning_first_year,
+        last_validation_year=tuning_last_year,
+        minimum_train_years=CONFIG['tuning_minimum_train_years'],
+    )
+    print(
+        f"Walk-forward anual compartido: "
+        f"{len(validation_folds)} folds "
+        f"({validation_folds[0]['year']}–{validation_folds[-1]['year']})."
+    )
+    print(
+        f"Optuna se ajusta solo en "
+        f"{tuning_folds[0]['year']}–{tuning_folds[-1]['year']}; "
+        "esas fechas no aparecen en las métricas finales."
+    )
+    wandb.config.update({
+        'actual_validation_folds': len(validation_folds),
+        'validation_years': [fold['year'] for fold in validation_folds],
+        'tuning_validation_years': [fold['year'] for fold in tuning_folds],
+    })
 
-    def evaluate_params(params, final=False):
+    def evaluate_params(params):
         maes = []
-        for train_idx, test_idx in tscv.split(dates):
-            raw_train_dates = dates[train_idx]
-            raw_test_dates = dates[test_idx]
-            if len(raw_test_dates) <= CONFIG['embargo_days']: continue
-            test_dates = raw_test_dates[CONFIG['embargo_days']:]
-            # Target(t) uses t+5. Train labels must therefore finish before the raw train end.
-            train_cutoff = pd.Timestamp(raw_train_dates[-1]) - pd.Timedelta(days=CONFIG['horizon'])
-            train_dates = dates[dates <= np.datetime64(train_cutoff)]
-            trmask = df.trade_date.isin(train_dates); temask = df.trade_date.isin(test_dates)
-            Xtr0, ytr = X_base.loc[trmask].copy(), y.loc[trmask].copy()
-            Xte0, yte = X_base.loc[temask].copy(), y.loc[temask].copy()
-            dgtr, dgtest = add_rolling_garch_features(df.loc[trmask].copy(), df.loc[temask].copy())
-            Xtr = Xtr0.copy(); Xte = Xte0.copy()
-            Xtr['garch_volatility'] = dgtr.garch_volatility.to_numpy(); Xtr['garch_variance'] = dgtr.garch_variance.to_numpy()
-            Xte['garch_volatility'] = dgtest.garch_volatility.to_numpy(); Xte['garch_variance'] = dgtest.garch_variance.to_numpy()
+        for fold_spec in tuning_folds:
+            Xtr, ytr, Xte, yte, _, _ = prepare_fold_data(
+                df, X_base, y, fold_spec
+            )
             m = CatBoostRegressor(**params); m.fit(Xtr, ytr, cat_features=cat_idx)
             maes.append(mean_absolute_error(yte, m.predict(Xte)))
         return float(np.mean(maes)) if maes else float('inf')
@@ -342,34 +430,59 @@ def main():
         }
         return evaluate_params(p)
 
-    print(f'🎯 Optuna: {CONFIG["optuna_trials"]} trials')
+    print(
+        f'🎯 Optuna: {CONFIG["optuna_trials"]} trials x '
+        f'{len(tuning_folds)} folds de ajuste'
+    )
     study = optuna.create_study(direction='minimize')
     study.optimize(objective, n_trials=CONFIG['optuna_trials'])
     best = study.best_params
     best.update({'loss_function':'Huber:delta=1.0','bootstrap_type':'Bernoulli','random_seed':CONFIG['random_state'],'thread_count':-1,'verbose':0})
     wandb.config.update({'best_params': best})
 
-    fold_metrics = []; pred_frames = []
-    for fold, (train_idx, test_idx) in enumerate(tscv.split(dates), 1):
-        raw_train_dates = dates[train_idx]; raw_test_dates = dates[test_idx]
-        if len(raw_test_dates) <= CONFIG['embargo_days']: continue
-        test_dates = raw_test_dates[CONFIG['embargo_days']:]
-        train_cutoff = pd.Timestamp(raw_train_dates[-1]) - pd.Timedelta(days=CONFIG['horizon'])
-        train_dates = dates[dates <= np.datetime64(train_cutoff)]
-        print(f'\n========== FOLD {fold} ==========')
-        print(f'Train target <= {pd.Timestamp(train_dates[-1]).date()} | Test {pd.Timestamp(test_dates[0]).date()} -> {pd.Timestamp(test_dates[-1]).date()}')
-        trmask = df.trade_date.isin(train_dates); temask = df.trade_date.isin(test_dates)
-        Xtr0, ytr = X_base.loc[trmask].copy(), y.loc[trmask].copy(); Xte0, yte = X_base.loc[temask].copy(), y.loc[temask].copy()
-        dgtr, dgtest = add_rolling_garch_features(df.loc[trmask].copy(), df.loc[temask].copy())
-        Xtr = Xtr0.copy(); Xte = Xte0.copy()
-        Xtr['garch_volatility'] = dgtr.garch_volatility.to_numpy(); Xtr['garch_variance'] = dgtr.garch_variance.to_numpy()
-        Xte['garch_volatility'] = dgtest.garch_volatility.to_numpy(); Xte['garch_variance'] = dgtest.garch_variance.to_numpy()
+    fold_metrics = []
+    pred_frames = []
+    metric_names = [
+        'mae', 'rmse', 'r2', 'hit_rate', 'sharpe_long_short',
+        'sharpe_long_only', 'positive_signal_precision',
+        'positive_signal_coverage', 'hit_rate_vix_gt_20',
+    ]
+    for fold_spec in validation_folds:
+        fold = fold_spec['fold']
+        year = fold_spec['year']
+        Xtr, ytr, Xte, yte, df_train, df_test = prepare_fold_data(
+            df, X_base, y, fold_spec
+        )
+        train_target_end = df_train['target_end_date'].max()
+        validation_start = fold_spec['validation_start_date']
+        validation_end = fold_spec['validation_end_date']
+        print(f'\n========== FOLD {fold} · {year} ==========')
+        print(
+            f'Train labels hasta {train_target_end.date()} | '
+            f'Test {validation_start.date()} -> {validation_end.date()} | '
+            f'{len(yte):,} predicciones'
+        )
         model = CatBoostRegressor(**best); model.fit(Xtr, ytr, cat_features=cat_idx); yp = model.predict(Xte)
         met = metrics(yte, yp, Xte)
         print(f'MAE {met["mae"]:.4f} | RMSE {met["rmse"]:.4f} | R2 {met["r2"]:.4f} | Hit {met["hit_rate"]:.2%} | Sharpe L/O {met["sharpe_long_only"]:.2f} | VIX>20 {met["hit_rate_vix_gt_20"]:.2%}')
         wandb.log({f'fold_{fold}/{k}':v for k,v in met.items()})
-        pred_frames.append(prediction_frame(Xte, yte, yp, fold))
-        fold_metrics.append({'fold': fold, **met})
+        wandb.log({
+            f'fold_{fold}/validation_year': year,
+            f'fold_{fold}/validation_start_date': validation_start.isoformat(),
+            f'fold_{fold}/validation_end_date': validation_end.isoformat(),
+            f'fold_{fold}/train_last_target_end_date': train_target_end.isoformat(),
+        })
+        pred_frames.append(
+            prediction_frame(Xte, yte, yp, fold, year, df_test)
+        )
+        fold_metrics.append({
+            'fold': fold,
+            'validation_year': year,
+            'validation_start_date': validation_start,
+            'validation_end_date': validation_end,
+            'train_last_target_end_date': train_target_end,
+            **met,
+        })
 
     preds = pd.concat(pred_frames, ignore_index=True)
     os.makedirs('data', exist_ok=True)
@@ -379,10 +492,15 @@ def main():
     explore_regime_tree(preds)
 
     fm = pd.DataFrame(fold_metrics)
+    fm.to_csv(CONFIG['fold_metrics_csv'], index=False)
+    print(f'✔ Métricas por fold guardadas en {CONFIG["fold_metrics_csv"]}')
     print('\n========== RESUMEN ==========')
-    for c in fm.columns:
-        if c != 'fold': print(f'{c:32s}: {fm[c].mean():.6f} ± {fm[c].std(ddof=0):.6f}')
-    wandb.log({f'cv_mean_{c}':fm[c].mean() for c in fm.columns if c != 'fold'})
+    for c in metric_names:
+        print(f'{c:32s}: {fm[c].mean():.6f} ± {fm[c].std(ddof=0):.6f}')
+    wandb.log({
+        f'cv_mean_{c}': fm[c].mean()
+        for c in metric_names
+    })
 
     # Modelo de producción final: GARCH ajustado con todo el histórico disponible.
     dg, _ = add_rolling_garch_features(df.copy(), pd.DataFrame(columns=df.columns))
@@ -395,7 +513,13 @@ def main():
     except Exception as exc: print(f'⚠️ SHAP omitido: {exc}')
 
     art = wandb.Artifact('catboost-regime-aware', type='model'); art.add_file(CONFIG['model_path'])
-    for p in [CONFIG['prediction_csv'], CONFIG['regime_csv'], CONFIG['tree_rules_txt'], CONFIG['tree_importance_csv']]:
+    for p in [
+        CONFIG['prediction_csv'],
+        CONFIG['fold_metrics_csv'],
+        CONFIG['regime_csv'],
+        CONFIG['tree_rules_txt'],
+        CONFIG['tree_importance_csv'],
+    ]:
         if os.path.exists(p): art.add_file(p)
     wandb.log_artifact(art); wandb.finish()
     print('\n✅ Proceso completado.')

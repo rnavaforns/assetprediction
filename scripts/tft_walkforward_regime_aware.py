@@ -22,6 +22,10 @@ from sklearn.metrics import (
 from sklearn.tree import DecisionTreeClassifier, export_text
 from dotenv import load_dotenv
 import wandb
+try:
+    from walkforward_folds import annual_expanding_folds
+except ModuleNotFoundError:
+    from scripts.walkforward_folds import annual_expanding_folds
 warnings.filterwarnings("ignore")
 load_dotenv()
 # ============================================================
@@ -68,8 +72,10 @@ torch.set_num_threads(2)
 
 CONFIG = {
     "model_type": "TemporalFusionTransformer_WalkForward_RegimeAware",
-    "n_folds": 5,
-    "fold_size": 50,
+    "first_validation_year": int(
+        os.getenv("WALK_FORWARD_FIRST_VALIDATION_YEAR", "2016")
+    ),
+    "minimum_train_years": 4,
     "max_encoder_length": 30,
     "max_prediction_length": 5,
     "safe_decoder_lag_days": 5,
@@ -81,10 +87,11 @@ CONFIG = {
     "dropout": 0.1,
     "random_state": 42,
     "target": "forward_return_5d",
-    "start_date": os.getenv("TFT_START_DATE", "2010-01-01"),
+    "start_date": os.getenv("WALK_FORWARD_START_DATE", "2011-01-01"),
     "market_ticker": "SPY",
     "parquet_path": "data/gold_dataset.parquet",
     "prediction_csv": "data/tft_prediction_level.csv",
+    "fold_metrics_csv": "data/tft_walkforward_fold_metrics.csv",
     "regime_csv": "data/tft_regime_analysis.csv",
     "tree_rules_txt": "data/tft_regime_tree_rules.txt",
     "tree_importance_csv": "data/tft_regime_tree_importance.csv",
@@ -1198,27 +1205,22 @@ def main():
         raise ValueError(
             f"No hay sesiones de referencia para {market_ticker}."
         )
-    n_folds = CONFIG["n_folds"]
-    fold_size = CONFIG["fold_size"]
-    minimum_sessions = (
-        n_folds * fold_size
-        + CONFIG["max_prediction_length"]
-        + CONFIG["max_encoder_length"]
-        + 1
+    fold_specs = annual_expanding_folds(
+        session_dates,
+        first_validation_year=CONFIG["first_validation_year"],
+        minimum_train_years=CONFIG["minimum_train_years"],
     )
-    if len(session_dates) < minimum_sessions:
-        raise ValueError(
-            f"Solo hay {len(session_dates)} sesiones de {market_ticker}; "
-            f"se necesitan "
-            f"al menos {minimum_sessions} para {n_folds} folds de "
-            f"{fold_size} sesiones y sus ventanas de contexto."
-        )
+    n_folds = len(fold_specs)
+    wandb.config.update({
+        "actual_validation_folds": n_folds,
+        "validation_years": [fold_spec["year"] for fold_spec in fold_specs],
+    })
     fold_results = []
     prediction_frames = []
     print("\n==================================================")
     print(
-        f" WALK-FORWARD CV: {n_folds} folds x "
-        f"{fold_size} sesiones de {market_ticker}"
+        f" WALK-FORWARD EXPANSIVO: {n_folds} folds anuales "
+        f"({fold_specs[0]['year']}–{fold_specs[-1]['year']})"
     )
     print("==================================================")
     for fold in range(n_folds):
@@ -1227,18 +1229,17 @@ def main():
             f"               EJECUTANDO FOLD {fold + 1}/{n_folds}"
         )
         print("==================================================")
-        val_end_pos = (
-            len(session_dates)
-            - 1
-            - (n_folds - 1 - fold) * fold_size
-        )
-        val_boundary_pos = val_end_pos - fold_size
-        validation_start_date = session_dates[val_boundary_pos + 1]
-        validation_end_date = session_dates[val_end_pos]
+        fold_spec = fold_specs[fold]
+        validation_start_date = fold_spec["validation_start_date"]
+        validation_end_date = fold_spec["validation_end_date"]
         print(
-            f"  • Validation          : "
+            f"  • Año / validation    : {fold_spec['year']} | "
             f"{validation_start_date.date()} -> "
             f"{validation_end_date.date()}"
+        )
+        print(
+            f"  • Última fecha train  : "
+            f"{fold_spec['train_last_date'].date()}"
         )
         (
             df_train,
@@ -1339,6 +1340,7 @@ def main():
             full_df=df,
             fold=fold + 1,
         )
+        prediction_df["validation_year"] = fold_spec["year"]
         prediction_frames.append(
             prediction_df
         )
@@ -1410,8 +1412,10 @@ def main():
         })
         fold_results.append({
             "fold": fold + 1,
+            "validation_year": fold_spec["year"],
             "validation_start_date": validation_start_date,
             "validation_end_date": validation_end_date,
+            "train_last_date": fold_spec["train_last_date"],
             "latest_train_label_end_date": df.loc[
                 df["target_end_date"] < validation_start_date,
                 "target_end_date",
@@ -1501,6 +1505,9 @@ def main():
     # RESUMEN GLOBAL
     # ========================================================
     summary = pd.DataFrame(fold_results)
+    os.makedirs(os.path.dirname(CONFIG["fold_metrics_csv"]) or ".", exist_ok=True)
+    summary.to_csv(CONFIG["fold_metrics_csv"], index=False)
+    print(f"✔ Métricas por fold guardadas en: {CONFIG['fold_metrics_csv']}")
     print("\n==================================================")
     print(
         f" RESUMEN FINAL WALK-FORWARD CV "
@@ -1562,6 +1569,7 @@ def main():
     )
     files_to_add = [
         CONFIG["prediction_csv"],
+        CONFIG["fold_metrics_csv"],
         CONFIG["regime_csv"],
         CONFIG["tree_rules_txt"],
         CONFIG["tree_importance_csv"],
