@@ -96,6 +96,7 @@ jobs:
 
     # 10. Extracción Única: Crea el .parquet local
     - name: Fetch Gold Dataset to Local Parquet
+      id: fetch_gold
       env:
         SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
         SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
@@ -176,6 +177,9 @@ jobs:
 
     # 22. Catboost con análisis de momento de mercado
     - name: Train Catboost con análisis de régimen de mercado
+      # Los modelos son independientes: si TFT falla, CatBoost aún puede
+      # generar sus resultados siempre que el parquet se haya descargado.
+      if: ${{ !cancelled() && steps.fetch_gold.outcome == 'success' }}
       env:
         WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
       run: python scripts/catboost_garch_regression_regime_aware.py
@@ -187,13 +191,32 @@ jobs:
         name: regime-analysis-${{ github.run_number }}
         path: |
           data/tft_prediction_level.csv
+          data/tft_walkforward_fold_metrics.csv
           data/tft_regime_analysis.csv
           data/tft_regime_tree_rules.txt
           data/tft_regime_tree_importance.csv
+          data/tft_cross_window_predictions.parquet
+          data/tft_cross_window_metrics.csv
+          data/tft_vintage_training_regime_profile.csv
+          data/tft_cross_window_tree_metrics.csv
+          data/tft_cross_window_tree_rules.txt
+          data/tft_cross_window_tree_importance.csv
+          data/tft_cross_window_tree_bundle.joblib
+          data/tft_model_vintages/**
           data/catboost_prediction_level.csv
+          data/catboost_walkforward_fold_metrics.csv
           data/catboost_regime_analysis.csv
           data/catboost_regime_tree_rules.txt
           data/catboost_regime_tree_importance.csv
+          data/catboost_cross_window_predictions.parquet
+          data/catboost_cross_window_metrics.csv
+          data/catboost_vintage_training_regime_profile.csv
+          data/catboost_cross_window_tree_metrics.csv
+          data/catboost_cross_window_tree_rules.txt
+          data/catboost_cross_window_tree_importance.csv
+          data/catboost_cross_window_tree_bundle.joblib
+          data/catboost_model_vintages/**
+          catboost_regime_aware_model.cbm
         if-no-files-found: warn
         retention-days: 30
 

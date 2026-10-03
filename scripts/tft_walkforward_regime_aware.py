@@ -1344,12 +1344,15 @@ def main():
         pl.seed_everything(CONFIG["random_state"] + fold, workers=True)
         vintage_model = TemporalFusionTransformer.from_dataset(
             training_data,
-            learning_rate=CONFIG["learning_rate"],
+            # PyTorch Forecasting emits an invalid empty scheduler config when
+            # reduce_on_plateau_patience=None. A one-element schedule gives
+            # Lightning a valid constant-LR scheduler without monitoring the
+            # external validation years.
+            learning_rate=[CONFIG["learning_rate"]],
             hidden_size=CONFIG["hidden_size"],
             attention_head_size=CONFIG["attention_head_size"],
             dropout=CONFIG["dropout"],
             loss=QuantileLoss(),
-            reduce_on_plateau_patience=None,
         )
         # La validación externa no interviene en early stopping ni en la
         # selección de época. Se usa un número fijo de épocas por vintage.
