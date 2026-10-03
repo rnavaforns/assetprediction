@@ -1,6 +1,7 @@
 .env
 .venv/
 wandb/
+analytics/
 xgb_model.json
 data/
 *.png
