@@ -37,6 +37,10 @@ except ModuleNotFoundError:
         summarize_prediction_window,
         summarize_training_regime_profile,
     )
+try:
+    from regime_run_metadata import write_wandb_run_metadata
+except ModuleNotFoundError:
+    from scripts.regime_run_metadata import write_wandb_run_metadata
 warnings.filterwarnings("ignore")
 load_dotenv()
 # ============================================================
@@ -1241,6 +1245,7 @@ def main():
         ],
         config=CONFIG,
     )
+    write_wandb_run_metadata("TFT")
     # --------------------------------------------------------
     # LOAD
     # --------------------------------------------------------

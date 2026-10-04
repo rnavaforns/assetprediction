@@ -1,0 +1,22 @@
+{
+  "predictor": {
+    "min_sharpe_long_only": 0.8,
+    "min_hit_rate": 0.6,
+    "min_positive_signal_coverage": 0.0,
+    "min_positive_signal_precision": 0.6,
+    "min_predictions_per_window": 100,
+    "min_origin_dates_per_window": 20,
+    "min_passing_windows": 2
+  },
+  "tree": {
+    "min_sharpe_long_only_selected": 0.8,
+    "min_hit_rate_selected": 0.6,
+    "min_positive_signal_coverage_selected": 0.0,
+    "min_positive_signal_precision_selected": 0.6,
+    "min_tree_selected_coverage": 0.0,
+    "min_selected_predictions_per_window": 100,
+    "min_selected_origin_dates_per_window": 20,
+    "min_future_windows": 3,
+    "min_passing_future_windows": 2
+  }
+}

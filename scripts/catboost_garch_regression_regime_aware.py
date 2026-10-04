@@ -32,6 +32,10 @@ except ModuleNotFoundError:
         summarize_prediction_window,
         summarize_training_regime_profile,
     )
+try:
+    from regime_run_metadata import write_wandb_run_metadata
+except ModuleNotFoundError:
+    from scripts.regime_run_metadata import write_wandb_run_metadata
 
 try:
     from arch import arch_model
@@ -441,6 +445,7 @@ def prepare_model_vintage_data(df, X_base, y, fold_spec):
 def main():
     stamp = datetime.now().strftime('%Y-%m-%d-%H%M%S')
     wandb.init(project='tfm-market-prediction', name=f'catboost-regime-wf-{stamp}', group='regime_analysis', tags=['catboost','walk-forward','regime-analysis','leakage-safe','optuna'], config=CONFIG)
+    write_wandb_run_metadata('CatBoost')
     df = load_data(CONFIG['parquet_path'])
     global_regimes = build_global_regimes(df)
     df = df.merge(global_regimes, on='trade_date', how='left')

@@ -24,6 +24,9 @@ jobs:
       with:
         python-version: '3.12'
         cache: 'pip' # Optimiza ejecuciones futuras recordando las librerías de pip
+        cache-dependency-path: |
+          requirements.txt
+          requirements-analysis.txt
 
     # 3. Cachear el modelo de Hugging Face (FinBERT)
     - name: Cache Hugging Face models
@@ -40,6 +43,7 @@ jobs:
         python -m pip install --upgrade pip
         pip install torch --extra-index-url https://download.pytorch.org/whl/cpu
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        pip install -r requirements-analysis.txt
 
     # 5. Ejecutar el Pipeline de Mercado (Yahoo Finance)
     - name: Run Market Ingestion
@@ -72,7 +76,7 @@ jobs:
         SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
         FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
       run: python scripts/ingesta_sentiment.py
-      
+
     # 8. Transformación Bronze -> Silver
     - name: Transformación Bronze -> Silver
       env:
@@ -184,6 +188,15 @@ jobs:
         WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
       run: python scripts/catboost_garch_regression_regime_aware.py
 
+    - name: Analizar árboles y ventanas cruzadas
+      if: ${{ !cancelled() && steps.fetch_gold.outcome == 'success' }}
+      run: >-
+        python scripts/analyze_regime_artifacts.py
+        --data-dir data
+        --output-dir analysis/regime_automation
+        --criteria config/regime_analysis_thresholds.json
+        --portfolio-criteria config/portfolio_backtest.json
+
     - name: Guardar análisis de regímenes TFT + CatBoost
       if: always()
       uses: actions/upload-artifact@v4
@@ -203,6 +216,7 @@ jobs:
           data/tft_cross_window_tree_importance.csv
           data/tft_cross_window_tree_bundle.joblib
           data/tft_model_vintages/**
+          data/tft_wandb_run.json
           data/catboost_prediction_level.csv
           data/catboost_walkforward_fold_metrics.csv
           data/catboost_regime_analysis.csv
@@ -217,6 +231,25 @@ jobs:
           data/catboost_cross_window_tree_bundle.joblib
           data/catboost_model_vintages/**
           catboost_regime_aware_model.cbm
+          data/catboost_wandb_run.json
+        if-no-files-found: warn
+        retention-days: 30
+
+    - name: Publicar informe interactivo de regímenes
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: regime-insights-${{ github.run_number }}
+        path: |
+          analysis/regime_automation/**
+          scripts/analyze_regime_artifacts.py
+          scripts/regime_analysis_dashboard.py
+          scripts/regime_run_metadata.py
+          scripts/portfolio_backtest.py
+          requirements-analysis.txt
+          config/regime_analysis_thresholds.json
+          config/portfolio_backtest.json
+          docs/portfolio_backtest_assumptions.md
         if-no-files-found: warn
         retention-days: 30
 
