@@ -3,7 +3,7 @@
 import logging
 import os
 import time
-from datetime import date, timedelta
+from datetime import timedelta
 
 from dotenv import load_dotenv
 from fredapi import Fred
@@ -12,6 +12,7 @@ from sqlalchemy import create_engine, text
 from fred_macro_vintages import (
     SUPPORTED_MACRO_SERIES,
     fetch_release_snapshots,
+    fred_today,
 )
 
 
@@ -57,7 +58,7 @@ def ingesta_macro_incremental():
         raise RuntimeError("FRED_API_KEY no encontrada en el archivo .env")
 
     lookback_days = int(os.getenv("MACRO_INCREMENTAL_LOOKBACK_DAYS", "400"))
-    release_cutoff = date.today() - timedelta(days=lookback_days)
+    release_cutoff = fred_today() - timedelta(days=lookback_days)
     engine = get_db_engine()
     fred = Fred(api_key=fred_api_key)
 

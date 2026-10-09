@@ -8,7 +8,8 @@ general, the date when the observation became public.  ALFRED's
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -33,6 +34,17 @@ SUPPORTED_MACRO_SERIES = {
 }
 LEGACY_MACRO_SERIES = {"ECBMAINR", "ISMCONPMI"}
 logger = logging.getLogger(__name__)
+FRED_TIMEZONE = ZoneInfo("America/Chicago")
+
+
+def fred_today() -> date:
+    """Return today's date in FRED's Central time zone.
+
+    GitHub Actions runs in UTC, while FRED validates real-time dates against
+    its US date. Around UTC midnight, the runner can therefore be one day
+    ahead of FRED.
+    """
+    return datetime.now(FRED_TIMEZONE).date()
 
 
 def _fetch_releases_window(fred, series_id: str, window_start: date, window_end: date):
@@ -135,7 +147,7 @@ def fetch_release_snapshots(
     omit it and store only actual subsequent release dates.
     """
     requested_start_date = pd.Timestamp(start_date).date()
-    last_release_date = date.today()
+    last_release_date = fred_today()
 
     # Query one exact real-time date to seed every observation period's value
     # as known at the boundary. This avoids downloading all pre-start vintages.
