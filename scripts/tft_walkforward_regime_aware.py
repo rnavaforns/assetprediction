@@ -1,6 +1,10 @@
+import argparse
+import glob
+import json
 import os
 import warnings
 import gc
+import time
 from datetime import datetime
 import numpy as np
 import pandas as pd
@@ -96,6 +100,7 @@ CONFIG = {
     "safe_decoder_lag_days": 5,
     "batch_size": 64,
     "max_epochs": 12,
+    "accelerator": os.getenv("TFT_ACCELERATOR", "cpu"),
     "learning_rate": 0.01,
     "hidden_size": 16,
     "attention_head_size": 1,
@@ -115,11 +120,224 @@ CONFIG = {
     "cross_window_tree_importance_csv": "data/tft_cross_window_tree_importance.csv",
     "cross_window_tree_bundle": "data/tft_cross_window_tree_bundle.joblib",
     "vintage_model_dir": "data/tft_model_vintages",
+    "vintage_shard_dir": "data/tft_vintage_shards",
+    "stage_timings_csv": "data/tft_stage_timings.csv",
     "regime_csv": "data/tft_regime_analysis.csv",
     "tree_rules_txt": "data/tft_regime_tree_rules.txt",
     "tree_importance_csv": "data/tft_regime_tree_importance.csv",
     "artifact_name": "tft-gold-walkforward-regime-analysis",
 }
+
+
+def prepare_ticker_frames(df: pd.DataFrame):
+    """Sort and index ticker histories once for all walk-forward windows."""
+    frames = {}
+    for ticker, ticker_df in df.groupby("ticker", sort=False):
+        ticker_df = ticker_df.sort_values("trade_date")
+        frames[str(ticker)] = (
+            ticker_df,
+            pd.DatetimeIndex(ticker_df["trade_date"]),
+        )
+    return frames
+
+
+def collect_window_frames(
+    ticker_frames,
+    allowed_tickers: set[str],
+    validation_start_date: pd.Timestamp,
+    validation_end_date: pd.Timestamp,
+):
+    """Slice encoder context and validation dates from pre-sorted ticker data."""
+    val_frames = []
+    for ticker, (ticker_df, dates) in ticker_frames.items():
+        if ticker not in allowed_tickers:
+            continue
+        start = dates.searchsorted(validation_start_date, side="left")
+        end = dates.searchsorted(validation_end_date, side="right")
+        context_start = max(0, start - CONFIG["max_encoder_length"])
+        has_full_encoder = start - context_start >= CONFIG["max_encoder_length"]
+        has_targets = end > start
+        if has_full_encoder and has_targets:
+            val_frames.append(ticker_df.iloc[context_start:end])
+    return val_frames
+
+
+def record_stage_timing(
+    rows: list[dict], fold: int, vintage_year: int, stage: str,
+    started_at: float, evaluation_year: int | None = None,
+):
+    elapsed = time.perf_counter() - started_at
+    rows.append({
+        "model_vintage_fold": fold,
+        "model_vintage_year": vintage_year,
+        "evaluation_year": evaluation_year,
+        "stage": stage,
+        "elapsed_seconds": elapsed,
+    })
+    return elapsed
+
+
+def fold_specs_from_frame(frame: pd.DataFrame):
+    session_dates = pd.DatetimeIndex(
+        frame.loc[
+            frame["ticker"].astype(str) == CONFIG["market_ticker"],
+            "trade_date",
+        ]
+        .dropna()
+        .drop_duplicates()
+        .sort_values()
+    )
+    if session_dates.empty:
+        raise ValueError(f"No hay sesiones de referencia para {CONFIG['market_ticker']}.")
+    return annual_expanding_folds(
+        session_dates,
+        first_validation_year=CONFIG["first_validation_year"],
+        minimum_train_years=CONFIG["minimum_train_years"],
+    )
+
+
+def fold_specs_from_parquet(parquet_path: str):
+    dates = load_gold_data(parquet_path, verbose=False)
+    return fold_specs_from_frame(dates)
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Entrena y analiza TFT en vintages walk-forward cruzados."
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--vintage-index",
+        type=int,
+        help="Ejecuta solo un vintage (índice 1-based) y guarda un shard completo.",
+    )
+    mode.add_argument(
+        "--aggregate-shards",
+        action="store_true",
+        help="Agrega los shards de vintages ya completados, sin volver a entrenar.",
+    )
+    mode.add_argument(
+        "--list-vintages",
+        action="store_true",
+        help="Imprime como JSON los índices de vintages disponibles para este parquet.",
+    )
+    return parser.parse_args(argv)
+
+
+def save_vintage_shard(
+    fold: int,
+    predictions: pd.DataFrame,
+    window_metrics: pd.DataFrame,
+    fold_metrics: pd.DataFrame,
+    training_profile: pd.DataFrame,
+    stage_timings: pd.DataFrame,
+    model_path: str,
+    vintage_year: int,
+):
+    shard_dir = os.path.join(CONFIG["vintage_shard_dir"], f"vintage_{fold:02d}")
+    os.makedirs(shard_dir, exist_ok=True)
+    prefix = os.path.join(shard_dir, f"tft_vintage_{fold:02d}")
+    marker_path = f"{prefix}.complete.json"
+    if os.path.exists(marker_path):
+        os.remove(marker_path)
+    predictions.to_parquet(f"{prefix}_cross_predictions.parquet", index=False)
+    window_metrics.to_csv(f"{prefix}_cross_window_metrics.csv", index=False)
+    fold_metrics.to_csv(f"{prefix}_fold_metrics.csv", index=False)
+    training_profile.to_csv(f"{prefix}_training_regime_profile.csv", index=False)
+    stage_timings.to_csv(f"{prefix}_stage_timings.csv", index=False)
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"No se encuentra el checkpoint del vintage: {model_path}")
+
+    # El marcador se escribe al final: el agregador solo acepta shards cuyos
+    # datos, métricas y checkpoint ya se han guardado completamente.
+    marker = {
+        "model_vintage_fold": fold,
+        "model_vintage_year": int(vintage_year),
+        "model_path": model_path,
+    }
+    temporary_marker = f"{marker_path}.tmp"
+    with open(temporary_marker, "w", encoding="utf-8") as marker_file:
+        json.dump(marker, marker_file, indent=2)
+    os.replace(temporary_marker, marker_path)
+
+
+def load_vintage_shards(fold_specs):
+    """Load exactly one complete prediction shard for every expected vintage."""
+    n_folds = len(fold_specs)
+    predictions, cross_metrics, fold_metrics = [], [], []
+    training_profiles, stage_timings, model_paths = [], [], []
+    marker_paths = glob.glob(
+        os.path.join(CONFIG["vintage_shard_dir"], "**", "tft_vintage_*.complete.json"),
+        recursive=True,
+    )
+    markers_by_fold = {}
+    for marker_path in marker_paths:
+        with open(marker_path, encoding="utf-8") as marker_file:
+            marker = json.load(marker_file)
+        markers_by_fold.setdefault(int(marker["model_vintage_fold"]), []).append(
+            (marker_path, marker)
+        )
+
+    for fold in range(1, n_folds + 1):
+        matches = markers_by_fold.get(fold, [])
+        if len(matches) != 1:
+            raise FileNotFoundError(
+                f"Se esperaba exactamente un shard completo para el vintage {fold}; "
+                f"se encontraron {len(matches)}."
+            )
+        marker_path, marker = matches[0]
+        expected_year = int(fold_specs[fold - 1]["year"])
+        if int(marker["model_vintage_year"]) != expected_year:
+            raise ValueError(
+                f"El shard {fold} corresponde a {marker['model_vintage_year']}, "
+                f"pero el Gold actual requiere {expected_year}."
+            )
+        shard_dir = os.path.dirname(marker_path)
+        prefix = os.path.join(shard_dir, f"tft_vintage_{fold:02d}")
+        required = [
+            f"{prefix}_cross_predictions.parquet",
+            f"{prefix}_cross_window_metrics.csv",
+            f"{prefix}_fold_metrics.csv",
+            f"{prefix}_training_regime_profile.csv",
+            f"{prefix}_stage_timings.csv",
+        ]
+        missing = [path for path in required if not os.path.exists(path)]
+        if missing:
+            raise FileNotFoundError(
+                f"El shard del vintage {fold} está incompleto: {missing}"
+            )
+        predictions.append(pd.read_parquet(required[0]))
+        cross_metrics.append(pd.read_csv(required[1]))
+        fold_metrics.append(pd.read_csv(required[2]))
+        try:
+            profile = pd.read_csv(required[3])
+        except pd.errors.EmptyDataError:
+            profile = pd.DataFrame()
+        if not profile.empty:
+            training_profiles.append(profile)
+        stage_timings.append(pd.read_csv(required[4]))
+
+        model_path = marker["model_path"]
+        if not os.path.exists(model_path):
+            model_matches = glob.glob(
+                os.path.join("data", "**", os.path.basename(model_path)),
+                recursive=True,
+            )
+            if len(model_matches) != 1:
+                raise FileNotFoundError(
+                    f"No se pudo resolver un checkpoint único para el vintage {fold}."
+                )
+            model_path = model_matches[0]
+        model_paths.append(model_path)
+
+    return {
+        "predictions": predictions,
+        "cross_metrics": cross_metrics,
+        "fold_metrics": fold_metrics,
+        "training_profiles": training_profiles,
+        "stage_timings": stage_timings,
+        "model_paths": model_paths,
+    }
 
 # ============================================================
 # UTILIDADES
@@ -163,8 +381,9 @@ def percentile_last(values: np.ndarray) -> float:
 # ============================================================
 # CARGA
 # ============================================================
-def load_gold_data(parquet_path: str) -> pd.DataFrame:
-    print(f"Cargando datos desde {parquet_path}...")
+def load_gold_data(parquet_path: str, verbose: bool = True) -> pd.DataFrame:
+    if verbose:
+        print(f"Cargando datos desde {parquet_path}...")
     if not os.path.exists(parquet_path):
         raise FileNotFoundError(
             f"No se encontró '{parquet_path}'. "
@@ -194,11 +413,12 @@ def load_gold_data(parquet_path: str) -> pd.DataFrame:
     )
     df = df[df[CONFIG["target"]].notna()].copy()
     df = df.sort_values(["ticker", "trade_date"]).reset_index(drop=True)
-    print(
-        f"Datos cargados: {df.shape[0]} filas, "
-        f"{df.shape[1]} columnas, desde {df['trade_date'].min().date()} "
-        f"hasta {df['trade_date'].max().date()}."
-    )
+    if verbose:
+        print(
+            f"Datos cargados: {df.shape[0]} filas, "
+            f"{df.shape[1]} columnas, desde {df['trade_date'].min().date()} "
+            f"hasta {df['trade_date'].max().date()}."
+        )
     return df
 
 # ============================================================
@@ -670,6 +890,7 @@ def build_fold_datasets(
     known_reals: list[str],
     validation_start_date: pd.Timestamp,
     validation_end_date: pd.Timestamp,
+    ticker_frames=None,
 ):
     """
     Construye train/validation manteniendo correctamente separada
@@ -690,23 +911,15 @@ def build_fold_datasets(
     # Para cada ticker, incluir sus últimas 30 observaciones antes del corte
     # y todas sus filas dentro de la misma ventana de validación calendario.
     # Esto conserva el encoder sin depender de índices reiniciados por ticker.
-    val_frames = []
     train_tickers = set(df_train["ticker"].astype(str).unique())
-    for ticker, ticker_df in df.groupby("ticker", sort=False):
-        # El embedding estático ticker solo puede evaluar categorías vistas
-        # durante el entrenamiento de este fold.
-        if str(ticker) not in train_tickers:
-            continue
-        ticker_df = ticker_df.sort_values("trade_date")
-        context = ticker_df[
-            ticker_df["trade_date"] < validation_start_date
-        ].tail(CONFIG["max_encoder_length"])
-        targets = ticker_df[
-            (ticker_df["trade_date"] >= validation_start_date)
-            & (ticker_df["trade_date"] <= validation_end_date)
-        ]
-        if len(context) >= CONFIG["max_encoder_length"] and not targets.empty:
-            val_frames.append(pd.concat([context, targets], ignore_index=False))
+    if ticker_frames is None:
+        ticker_frames = prepare_ticker_frames(df)
+    val_frames = collect_window_frames(
+        ticker_frames,
+        train_tickers,
+        validation_start_date,
+        validation_end_date,
+    )
     df_val = (
         pd.concat(val_frames, ignore_index=True)
         if val_frames
@@ -770,22 +983,17 @@ def build_vintage_validation_dataset(
     trained_tickers: set[str],
     validation_start_date: pd.Timestamp,
     validation_end_date: pd.Timestamp,
+    ticker_frames=None,
 ):
     """Make a later test window using transforms fitted by a frozen vintage."""
-    val_frames = []
-    for ticker, ticker_df in df.groupby("ticker", sort=False):
-        if str(ticker) not in trained_tickers:
-            continue
-        ticker_df = ticker_df.sort_values("trade_date")
-        context = ticker_df[
-            ticker_df["trade_date"] < validation_start_date
-        ].tail(CONFIG["max_encoder_length"])
-        targets = ticker_df[
-            (ticker_df["trade_date"] >= validation_start_date)
-            & (ticker_df["trade_date"] <= validation_end_date)
-        ]
-        if len(context) >= CONFIG["max_encoder_length"] and not targets.empty:
-            val_frames.append(pd.concat([context, targets], ignore_index=False))
+    if ticker_frames is None:
+        ticker_frames = prepare_ticker_frames(df)
+    val_frames = collect_window_frames(
+        ticker_frames,
+        trained_tickers,
+        validation_start_date,
+        validation_end_date,
+    )
 
     df_val = (
         pd.concat(val_frames, ignore_index=True)
@@ -833,15 +1041,63 @@ def build_prediction_level_dataframe(
         y_true = y_true[:, None]
     if y_pred.ndim == 1:
         y_pred = y_pred[:, None]
-    decoder_length = y_pred.shape[1]
+    if y_true.shape != y_pred.shape:
+        raise ValueError(
+            f"Las formas de y_true y y_pred no coinciden: "
+            f"{y_true.shape} != {y_pred.shape}."
+        )
+    sample_count, decoder_length = y_pred.shape
     decoded = validation_data.decoded_index.reset_index(drop=True)
-    if len(decoded) != y_pred.shape[0]:
+    if len(decoded) != sample_count:
         raise ValueError(
             "El número de muestras de decoded_index no coincide "
             "con el número de predicciones."
         )
-    rows = []
-    # Lookup exacto por ticker/time_idx.
+
+    # Cada fila de decoded_index representa una muestra y sus cinco pasos.
+    # Construimos de una vez las claves sample × horizon; así evitamos los
+    # bucles de Python y los accesos .loc individuales sobre pandas.
+    horizons = np.arange(1, decoder_length + 1, dtype=np.int64)
+    last_indices = pd.to_numeric(
+        decoded["time_idx_last"], errors="raise"
+    ).to_numpy(dtype=np.int64)
+    tickers = decoded["ticker"].astype(str).to_numpy()
+    target_indices = (
+        last_indices[:, None] - decoder_length + horizons[None, :]
+    )
+    origin_indices = last_indices - decoder_length
+    if not np.array_equal(
+        target_indices - horizons[None, :],
+        origin_indices[:, None],
+    ):
+        raise AssertionError("El origen reconstruido no coincide con el encoder.")
+
+    ticker_rows = np.repeat(tickers, decoder_length)
+    target_rows = target_indices.reshape(-1)
+    origin_rows = np.repeat(origin_indices, decoder_length)
+    true_rows = y_true.reshape(-1).astype(float, copy=False)
+    predicted_rows = y_pred.reshape(-1).astype(float, copy=False)
+    result = pd.DataFrame({
+        "fold": fold,
+        "ticker": ticker_rows,
+        "horizon_step": np.tile(horizons, sample_count),
+        "prediction_time_idx": origin_rows,
+        "origin_mapping_version": 2,
+        "target_time_idx": target_rows,
+        "y_true": true_rows,
+        "y_pred": predicted_rows,
+        "hit": (np.sign(true_rows) == np.sign(predicted_rows)).astype(int),
+        "predicted_up": (predicted_rows > 0).astype(int),
+        "actual_up": (true_rows > 0).astype(int),
+        "strategy_return_long_short": np.sign(predicted_rows) * true_rows,
+        "strategy_return_long_only": np.where(predicted_rows > 0, true_rows, 0.0),
+        "signal_positive_precision": np.where(
+            predicted_rows > 0,
+            (true_rows > 0).astype(float),
+            np.nan,
+        ),
+    })
+
     lookup_cols = [
         "ticker",
         "time_idx",
@@ -875,80 +1131,26 @@ def build_prediction_level_dataframe(
         "cross_asset_return_20d_dispersion",
     ]
     regime_cols = [c for c in regime_cols if c in full_df.columns]
+    lookup_df = full_df[lookup_cols + regime_cols].copy()
+    lookup_df["ticker"] = lookup_df["ticker"].astype(str)
     lookup = (
-        full_df[
-            lookup_cols + regime_cols
-        ]
+        lookup_df
         .drop_duplicates(["ticker", "time_idx"])
         .set_index(["ticker", "time_idx"])
-    )   
-    for sample_idx in range(len(decoded)):
-        ticker = str(decoded.loc[sample_idx, "ticker"])
-        last_idx = int(
-            decoded.loc[sample_idx, "time_idx_last"]
-        )
-        decoder_time_idxs = list(
-            range(
-                last_idx - decoder_length + 1,
-                last_idx + 1,
-            )
-        )
-        for horizon_step, target_idx in enumerate(
-            decoder_time_idxs, start=1
-        ):
-            true_value = float(
-                y_true[sample_idx, horizon_step - 1]
-            )
-            pred_value = float(
-                y_pred[sample_idx, horizon_step - 1]
-            )
-            # Las cinco salidas de una muestra comparten el mismo
-            # origen: el último punto del encoder, inmediatamente antes
-            # del primer paso del decoder. No usar target_idx - 1 aquí:
-            # eso desplaza el origen hacia delante en horizon_step - 1.
-            forecast_origin_idx = target_idx - horizon_step
-            expected_origin_idx = last_idx - decoder_length
-            if forecast_origin_idx != expected_origin_idx:
-                raise AssertionError(
-                    "El origen reconstruido no coincide con el final del encoder: "
-                    f"{forecast_origin_idx} != {expected_origin_idx}."
-                )
-            target_key = (ticker, target_idx)
-            origin_key = (ticker, forecast_origin_idx)
-            target_info = lookup.loc[target_key] if target_key in lookup.index else None
-            origin_info = lookup.loc[origin_key] if origin_key in lookup.index else None
-            row = {
-                "fold": fold,
-                "ticker": ticker,
-                "horizon_step": horizon_step,
-                "prediction_time_idx": forecast_origin_idx,
-                "origin_mapping_version": 2,
-                "target_time_idx": target_idx,
-                "y_true": true_value,
-                "y_pred": pred_value,
-                "hit": int(np.sign(true_value) == np.sign(pred_value)),
-                "predicted_up": int(pred_value > 0),
-                "actual_up": int(true_value > 0),
-                "strategy_return_long_short": (
-                    np.sign(pred_value) * true_value
-                ),
-                "strategy_return_long_only": (
-                    true_value if pred_value > 0 else 0.0
-                ),
-                "signal_positive_precision": (
-                    int(true_value > 0)
-                    if pred_value > 0
-                    else np.nan
-                ),
-            }
-            if target_info is not None:
-                row["target_date"] = target_info["trade_date"]
-            if origin_info is not None:
-                row["origin_date"] = origin_info["trade_date"]
-                for col in regime_cols:
-                    row[f"origin_{col}"] = origin_info[col]
-            rows.append(row)
-    result = pd.DataFrame(rows)
+    )
+    target_keys = pd.MultiIndex.from_arrays(
+        [ticker_rows, target_rows], names=["ticker", "time_idx"]
+    )
+    target_info = lookup.reindex(target_keys)
+    result["target_date"] = target_info["trade_date"].to_numpy()
+
+    origin_keys = pd.MultiIndex.from_arrays(
+        [ticker_rows, origin_rows], names=["ticker", "time_idx"]
+    )
+    origin_info = lookup.reindex(origin_keys)
+    result["origin_date"] = origin_info["trade_date"].to_numpy()
+    for col in regime_cols:
+        result[f"origin_{col}"] = origin_info[col].to_numpy()
     return result
 
 # ============================================================
@@ -1224,16 +1426,30 @@ def log_tft_interpretability(
 # ============================================================
 # MAIN
 # ============================================================
-def main():
+def main(argv=None):
+    args = parse_args(argv)
+    if args.list_vintages:
+        available_folds = fold_specs_from_parquet(CONFIG["parquet_path"])
+        if not available_folds:
+            raise ValueError("El Gold parquet no contiene vintages TFT evaluables.")
+        print(json.dumps(list(range(1, len(available_folds) + 1))))
+        return
+
     pl.seed_everything(
         CONFIG["random_state"],
         workers=True,
+    )
+    run_suffix = (
+        f"-vintage-{args.vintage_index:02d}"
+        if args.vintage_index is not None
+        else "-aggregate" if args.aggregate_shards else ""
     )
     wandb.init(
         project="tfm-market-prediction",
         name=(
             "tft-walkforward-regime-"
             f"{datetime.now().strftime('%Y-%m-%d-%H%M%S')}"
+            f"{run_suffix}"
         ),
         group="deep_learning",
         tags=[
@@ -1246,38 +1462,35 @@ def main():
         config=CONFIG,
     )
     write_wandb_run_metadata("TFT")
-    # --------------------------------------------------------
-    # LOAD
-    # --------------------------------------------------------
-    df = load_gold_data(
-        CONFIG["parquet_path"]
-    )
-    # --------------------------------------------------------
-    # PREPARE + GLOBAL REGIMES
-    # --------------------------------------------------------
-    df, known_reals = prepare_data_for_tft(df)
-    # --------------------------------------------------------
-    # WALK-FORWARD
-    # --------------------------------------------------------
-    market_ticker = CONFIG["market_ticker"]
-    session_dates = pd.DatetimeIndex(
-        df.loc[
-            df["ticker"].astype(str) == market_ticker,
-            "trade_date",
-        ]
-        .drop_duplicates()
-        .sort_values()
-    )
-    if session_dates.empty:
-        raise ValueError(
-            f"No hay sesiones de referencia para {market_ticker}."
-        )
-    fold_specs = annual_expanding_folds(
-        session_dates,
-        first_validation_year=CONFIG["first_validation_year"],
-        minimum_train_years=CONFIG["minimum_train_years"],
-    )
+    if args.aggregate_shards:
+        # Aggregation needs only the validation calendar and saved predictions;
+        # it does not need to reload and transform the full Gold feature matrix.
+        fold_specs = fold_specs_from_parquet(CONFIG["parquet_path"])
+        df = None
+        known_reals = []
+        ticker_frames = {}
+        ticker_indexing_seconds = 0.0
+    else:
+        # --------------------------------------------------------
+        # LOAD + PREPARE
+        # --------------------------------------------------------
+        df = load_gold_data(CONFIG["parquet_path"])
+        df, known_reals = prepare_data_for_tft(df)
+        # --------------------------------------------------------
+        # WALK-FORWARD PREPARATION
+        # --------------------------------------------------------
+        ticker_index_started = time.perf_counter()
+        ticker_frames = prepare_ticker_frames(df)
+        ticker_indexing_seconds = time.perf_counter() - ticker_index_started
+        fold_specs = fold_specs_from_frame(df)
     n_folds = len(fold_specs)
+    if n_folds == 0:
+        raise ValueError("El Gold parquet no contiene vintages TFT evaluables.")
+    if args.vintage_index is not None and not (1 <= args.vintage_index <= n_folds):
+        raise ValueError(
+            f"vintage-index debe estar entre 1 y {n_folds}; "
+            f"se recibió {args.vintage_index}."
+        )
     wandb.config.update({
         "actual_validation_folds": n_folds,
         "validation_years": [fold_spec["year"] for fold_spec in fold_specs],
@@ -1288,6 +1501,13 @@ def main():
     cross_window_metrics = []
     training_regime_profiles = []
     vintage_model_paths = []
+    stage_timings = [{
+        "model_vintage_fold": args.vintage_index or 1,
+        "model_vintage_year": fold_specs[(args.vintage_index or 1) - 1]["year"],
+        "evaluation_year": np.nan,
+        "stage": "ticker_history_indexing",
+        "elapsed_seconds": ticker_indexing_seconds,
+    }]
     os.makedirs(CONFIG["vintage_model_dir"], exist_ok=True)
     print("\n==================================================")
     print(
@@ -1297,11 +1517,52 @@ def main():
     print("Cada modelo se congela y se prueba en su año inicial y los posteriores.")
     print("==================================================")
 
-    for fold in range(n_folds):
+    if args.aggregate_shards:
+        shards = load_vintage_shards(fold_specs)
+        cross_prediction_frames = shards["predictions"]
+        cross_window_metrics = [
+            row
+            for frame in shards["cross_metrics"]
+            for row in frame.to_dict(orient="records")
+        ]
+        fold_results = [
+            row
+            for frame in shards["fold_metrics"]
+            for row in frame.to_dict(orient="records")
+        ]
+        training_regime_profiles = shards["training_profiles"]
+        stage_timings = [
+            row
+            for frame in shards["stage_timings"]
+            for row in frame.to_dict(orient="records")
+        ]
+        vintage_model_paths = shards["model_paths"]
+        prediction_frames = [
+            frame.loc[
+                frame["model_vintage_year"].astype(int)
+                == frame["evaluation_year"].astype(int)
+            ].copy()
+            for frame in cross_prediction_frames
+        ]
+        print(f"Cargados {len(cross_prediction_frames)} shards TFT completos.")
+
+    fold_indices = (
+        []
+        if args.aggregate_shards
+        else [args.vintage_index - 1]
+        if args.vintage_index is not None
+        else list(range(n_folds))
+    )
+    for fold in fold_indices:
         fold_spec = fold_specs[fold]
         vintage_year = fold_spec["year"]
         validation_start_date = fold_spec["validation_start_date"]
         validation_end_date = fold_spec["validation_end_date"]
+        fold_prediction_start = len(cross_prediction_frames)
+        fold_window_metric_start = len(cross_window_metrics)
+        fold_result_start = len(fold_results)
+        fold_profile_start = len(training_regime_profiles)
+        preparation_started = time.perf_counter()
         (
             df_train,
             df_val,
@@ -1312,6 +1573,11 @@ def main():
             known_reals=known_reals,
             validation_start_date=validation_start_date,
             validation_end_date=validation_end_date,
+            ticker_frames=ticker_frames,
+        )
+        record_stage_timing(
+            stage_timings, fold + 1, vintage_year,
+            "training_window_preparation", preparation_started,
         )
         train_last_target_end = df.loc[
             df["target_end_date"] < validation_start_date,
@@ -1341,12 +1607,18 @@ def main():
             f"muestras TFT {len(training_data):,}"
         )
 
+        loader_started = time.perf_counter()
         train_dataloader = training_data.to_dataloader(
             train=True,
             batch_size=CONFIG["batch_size"],
             num_workers=0,
         )
+        record_stage_timing(
+            stage_timings, fold + 1, vintage_year,
+            "training_dataloader_preparation", loader_started,
+        )
         pl.seed_everything(CONFIG["random_state"] + fold, workers=True)
+        training_started = time.perf_counter()
         vintage_model = TemporalFusionTransformer.from_dataset(
             training_data,
             # PyTorch Forecasting emits an invalid empty scheduler config when
@@ -1363,7 +1635,7 @@ def main():
         # selección de época. Se usa un número fijo de épocas por vintage.
         trainer = pl.Trainer(
             max_epochs=CONFIG["max_epochs"],
-            accelerator="cpu",
+            accelerator=CONFIG["accelerator"],
             devices=1,
             gradient_clip_val=0.1,
             callbacks=[],
@@ -1372,17 +1644,27 @@ def main():
             enable_progress_bar=True,
         )
         trainer.fit(vintage_model, train_dataloader)
+        training_seconds = record_stage_timing(
+            stage_timings, fold + 1, vintage_year,
+            "model_training", training_started,
+        )
         model_path = os.path.join(
             CONFIG["vintage_model_dir"],
             f"tft_vintage_{fold + 1:02d}_train_through_"
             f"{train_last_target_end:%Y%m%d}.ckpt",
         )
+        checkpoint_started = time.perf_counter()
         trainer.save_checkpoint(model_path)
+        record_stage_timing(
+            stage_timings, fold + 1, vintage_year,
+            "checkpoint_save", checkpoint_started,
+        )
         vintage_model_paths.append(model_path)
         trained_tickers = set(df_train["ticker"].astype(str).unique())
 
         for evaluation_spec in fold_specs[fold:]:
             evaluation_year = evaluation_spec["year"]
+            window_started = time.perf_counter()
             if evaluation_year == vintage_year:
                 evaluation_data = first_validation_data
             else:
@@ -1396,17 +1678,30 @@ def main():
                     validation_end_date=evaluation_spec[
                         "validation_end_date"
                     ],
+                    ticker_frames=ticker_frames,
                 )
             evaluation_dataloader = evaluation_data.to_dataloader(
                 train=False,
                 batch_size=CONFIG["batch_size"] * 2,
                 num_workers=0,
             )
+            record_stage_timing(
+                stage_timings, fold + 1, vintage_year,
+                "evaluation_window_preparation", window_started,
+                evaluation_year=evaluation_year,
+            )
+            prediction_started = time.perf_counter()
             raw_predictions = vintage_model.predict(
                 evaluation_dataloader,
                 mode="prediction",
                 return_y=True,
             )
+            record_stage_timing(
+                stage_timings, fold + 1, vintage_year,
+                "prediction", prediction_started,
+                evaluation_year=evaluation_year,
+            )
+            conversion_started = time.perf_counter()
             prediction_df = build_prediction_level_dataframe(
                 raw_predictions=raw_predictions,
                 validation_data=evaluation_data,
@@ -1420,13 +1715,18 @@ def main():
             prediction_df["model_train_cutoff_date"] = train_last_target_end
             prediction_df["tree_discovery_year"] = vintage_year
             cross_prediction_frames.append(prediction_df)
-
+            window_summary = summarize_prediction_window(prediction_df)
+            record_stage_timing(
+                stage_timings, fold + 1, vintage_year,
+                "prediction_row_conversion_and_metrics", conversion_started,
+                evaluation_year=evaluation_year,
+            )
             cross_window_metrics.append({
                 "model_vintage_fold": fold + 1,
                 "model_vintage_year": vintage_year,
                 "model_train_cutoff_date": train_last_target_end,
                 "evaluation_year": evaluation_year,
-                **summarize_prediction_window(prediction_df),
+                **window_summary,
             })
 
             if evaluation_year == vintage_year:
@@ -1465,6 +1765,7 @@ def main():
                         "positive_signal_coverage"
                     ],
                     f"fold_{fold + 1}_hit_rate_vix_gt_20": hit_high_vix,
+                    f"fold_{fold + 1}_training_seconds": training_seconds,
                 })
                 fold_results.append({
                     "fold": fold + 1,
@@ -1481,10 +1782,16 @@ def main():
                     "hit_rate_vix_gt_20": hit_high_vix,
                     "model_path": model_path,
                 })
+                interpretation_started = time.perf_counter()
                 log_tft_interpretability(
                     vintage_model,
                     evaluation_dataloader,
                     fold + 1,
+                )
+                record_stage_timing(
+                    stage_timings, fold + 1, vintage_year,
+                    "interpretability", interpretation_started,
+                    evaluation_year=evaluation_year,
                 )
             if evaluation_data is not first_validation_data:
                 del evaluation_data
@@ -1499,6 +1806,43 @@ def main():
             first_validation_data,
         )
         gc.collect()
+
+        fold_predictions = pd.concat(
+            cross_prediction_frames[fold_prediction_start:],
+            ignore_index=True,
+        )
+        fold_profiles = training_regime_profiles[fold_profile_start:]
+        fold_profile = (
+            pd.concat(fold_profiles, ignore_index=True)
+            if fold_profiles
+            else pd.DataFrame()
+        )
+        fold_timing_rows = [
+            row for row in stage_timings
+            if row["model_vintage_fold"] == fold + 1
+        ]
+        save_vintage_shard(
+            fold=fold + 1,
+            predictions=fold_predictions,
+            window_metrics=pd.DataFrame(
+                cross_window_metrics[fold_window_metric_start:]
+            ),
+            fold_metrics=pd.DataFrame(fold_results[fold_result_start:]),
+            training_profile=fold_profile,
+            stage_timings=pd.DataFrame(fold_timing_rows),
+            model_path=model_path,
+            vintage_year=vintage_year,
+        )
+        print(
+            f"  Tiempo vintage {fold + 1}: entrenamiento "
+            f"{training_seconds / 60:.1f} min; shards guardados."
+        )
+
+    if args.vintage_index is not None:
+        wandb.finish()
+        print(f"✔ Shard del vintage {args.vintage_index} completado.")
+        return
+
     # ========================================================
     # PREDICTION LEVEL DATASET
     # ========================================================
@@ -1541,6 +1885,17 @@ def main():
         CONFIG["training_regime_profile_csv"],
         index=False,
     )
+    timing_df = pd.DataFrame(stage_timings)
+    timing_df.to_csv(CONFIG["stage_timings_csv"], index=False)
+    if not timing_df.empty:
+        timing_totals = timing_df.groupby("stage")["elapsed_seconds"].sum()
+        wandb.log({
+            f"timing_total_{stage}_seconds": float(seconds)
+            for stage, seconds in timing_totals.items()
+        })
+        print("Tiempos acumulados por etapa:")
+        for stage, seconds in timing_totals.items():
+            print(f"  {stage}: {seconds / 60:.1f} min")
     (
         tree_validation_metrics,
         tree_bundle,
@@ -1683,6 +2038,7 @@ def main():
         CONFIG["cross_window_prediction_parquet"],
         CONFIG["cross_window_metrics_csv"],
         CONFIG["training_regime_profile_csv"],
+        CONFIG["stage_timings_csv"],
         CONFIG["cross_window_tree_metrics_csv"],
         CONFIG["cross_window_tree_rules_txt"],
         CONFIG["cross_window_tree_importance_csv"],

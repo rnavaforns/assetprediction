@@ -9,9 +9,11 @@ on:
     # Permite activar el script manualmente desde la pestaña "Actions" de GitHub
 
 jobs:
-  ingest_and_train:
+  prepare_data:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    outputs:
+      tft_vintage_indices: ${{ steps.tft_vintage_matrix.outputs.indices }}
 
     steps:
     # 1. Clonar el repositorio en la máquina virtual
@@ -109,6 +111,21 @@ jobs:
         SUPABASE_DB_NAME: ${{ secrets.SUPABASE_DB_NAME }}
       run: python scripts/fetch_data.py
 
+    - name: Calcular índices de vintages TFT
+      id: tft_vintage_matrix
+      run: |
+        indices=$(python scripts/tft_walkforward_regime_aware.py --list-vintages)
+        echo "indices=${indices}" >> "$GITHUB_OUTPUT"
+
+    - name: Guardar Gold para los jobs de modelos
+      uses: actions/upload-artifact@v4
+      with:
+        name: gold-dataset-${{ github.run_id }}
+        path: data/gold_dataset.parquet
+        overwrite: true
+        if-no-files-found: error
+        retention-days: 2
+
     # # =========================================================================
     # # MODELOS DE REGRESIÓN (ESTUDIO DE ABLACIÓN)
     # # =========================================================================
@@ -173,85 +190,236 @@ jobs:
     #     WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
     #   run: python scripts/train_xgb_walkforward_huber_time_garch.py
 
-    # 21. TFT con análisis de momento de mercado
-    - name: Train TFT con análisis de régimen de mercado
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/tft_walkforward_regime_aware.py
+  tft_vintages:
+    needs: prepare_data
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        vintage_index: ${{ fromJSON(needs.prepare_data.outputs.tft_vintage_indices) }}
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
 
-    # 22. Catboost con análisis de momento de mercado
-    - name: Train Catboost con análisis de régimen de mercado
-      # Los modelos son independientes: si TFT falla, CatBoost aún puede
-      # generar sus resultados siempre que el parquet se haya descargado.
-      if: ${{ !cancelled() && steps.fetch_gold.outcome == 'success' }}
-      env:
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      run: python scripts/catboost_garch_regression_regime_aware.py
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements.txt
+            requirements-analysis.txt
 
-    - name: Analizar árboles y ventanas cruzadas
-      if: ${{ !cancelled() && steps.fetch_gold.outcome == 'success' }}
-      run: >-
-        python scripts/analyze_regime_artifacts.py
-        --data-dir data
-        --output-dir analysis/regime_automation
-        --criteria config/regime_analysis_thresholds.json
-        --portfolio-criteria config/portfolio_backtest.json
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --extra-index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+          pip install -r requirements-analysis.txt
 
-    - name: Guardar análisis de regímenes TFT + CatBoost
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: regime-analysis-${{ github.run_number }}
-        path: |
-          data/tft_prediction_level.csv
-          data/tft_walkforward_fold_metrics.csv
-          data/tft_regime_analysis.csv
-          data/tft_regime_tree_rules.txt
-          data/tft_regime_tree_importance.csv
-          data/tft_cross_window_predictions.parquet
-          data/tft_cross_window_metrics.csv
-          data/tft_vintage_training_regime_profile.csv
-          data/tft_cross_window_tree_metrics.csv
-          data/tft_cross_window_tree_rules.txt
-          data/tft_cross_window_tree_importance.csv
-          data/tft_cross_window_tree_bundle.joblib
-          data/tft_model_vintages/**
-          data/tft_wandb_run.json
-          data/catboost_prediction_level.csv
-          data/catboost_walkforward_fold_metrics.csv
-          data/catboost_regime_analysis.csv
-          data/catboost_regime_tree_rules.txt
-          data/catboost_regime_tree_importance.csv
-          data/catboost_cross_window_predictions.parquet
-          data/catboost_cross_window_metrics.csv
-          data/catboost_vintage_training_regime_profile.csv
-          data/catboost_cross_window_tree_metrics.csv
-          data/catboost_cross_window_tree_rules.txt
-          data/catboost_cross_window_tree_importance.csv
-          data/catboost_cross_window_tree_bundle.joblib
-          data/catboost_model_vintages/**
-          catboost_regime_aware_model.cbm
-          data/catboost_wandb_run.json
-        if-no-files-found: warn
-        retention-days: 30
+      - name: Download Gold dataset
+        uses: actions/download-artifact@v4
+        with:
+          name: gold-dataset-${{ github.run_id }}
+          path: data
 
-    - name: Publicar informe interactivo de regímenes
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: regime-insights-${{ github.run_number }}
-        path: |
-          analysis/regime_automation/**
-          scripts/analyze_regime_artifacts.py
-          scripts/regime_analysis_dashboard.py
-          scripts/regime_run_metadata.py
-          scripts/portfolio_backtest.py
-          requirements-analysis.txt
-          config/regime_analysis_thresholds.json
-          config/portfolio_backtest.json
-          docs/portfolio_backtest_assumptions.md
-        if-no-files-found: warn
-        retention-days: 30
+      - name: Train and evaluate one frozen TFT vintage
+        env:
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+        run: >-
+          python scripts/tft_walkforward_regime_aware.py
+          --vintage-index ${{ matrix.vintage_index }}
+
+      - name: Save completed vintage shard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tft-vintage-${{ matrix.vintage_index }}
+          path: |
+            data/tft_vintage_shards/**
+            data/tft_model_vintages/**
+          overwrite: true
+          if-no-files-found: warn
+          retention-days: 30
+
+  catboost:
+    needs: prepare_data
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements.txt
+            requirements-analysis.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-analysis.txt
+
+      - name: Download Gold dataset
+        uses: actions/download-artifact@v4
+        with:
+          name: gold-dataset-${{ github.run_id }}
+          path: data
+
+      - name: Train Catboost with regime analysis
+        env:
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+        run: python scripts/catboost_garch_regression_regime_aware.py
+
+      - name: Save Catboost outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: catboost-results-${{ github.run_id }}
+          path: |
+            data/catboost_prediction_level.csv
+            data/catboost_walkforward_fold_metrics.csv
+            data/catboost_regime_analysis.csv
+            data/catboost_regime_tree_rules.txt
+            data/catboost_regime_tree_importance.csv
+            data/catboost_cross_window_predictions.parquet
+            data/catboost_cross_window_metrics.csv
+            data/catboost_vintage_training_regime_profile.csv
+            data/catboost_cross_window_tree_metrics.csv
+            data/catboost_cross_window_tree_rules.txt
+            data/catboost_cross_window_tree_importance.csv
+            data/catboost_cross_window_tree_bundle.joblib
+            data/catboost_model_vintages/**
+            data/catboost_wandb_run.json
+            catboost_regime_aware_model.cbm
+          overwrite: true
+          if-no-files-found: warn
+          retention-days: 30
+
+  aggregate_and_analyze:
+    needs: [prepare_data, tft_vintages, catboost]
+    if: ${{ !cancelled() && needs.prepare_data.result == 'success' && needs.tft_vintages.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements.txt
+            requirements-analysis.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --extra-index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+          pip install -r requirements-analysis.txt
+
+      - name: Download Gold dataset
+        uses: actions/download-artifact@v4
+        with:
+          name: gold-dataset-${{ github.run_id }}
+          path: data
+
+      - name: Download completed TFT vintage shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tft-vintage-*
+          path: data
+          merge-multiple: true
+
+      - name: Download Catboost outputs
+        if: ${{ needs.catboost.result == 'success' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: catboost-results-${{ github.run_id }}
+          path: .
+
+      - name: Aggregate TFT vintages and create cross-window artifacts
+        env:
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+        run: python scripts/tft_walkforward_regime_aware.py --aggregate-shards
+
+      - name: Analyze trees and cross-window results
+        run: >-
+          python scripts/analyze_regime_artifacts.py
+          --data-dir data
+          --output-dir analysis/regime_automation
+          --criteria config/regime_analysis_thresholds.json
+          --portfolio-criteria config/portfolio_backtest.json
+
+      - name: Save TFT and Catboost analysis artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regime-analysis-${{ github.run_number }}
+          path: |
+            data/tft_prediction_level.csv
+            data/tft_walkforward_fold_metrics.csv
+            data/tft_regime_analysis.csv
+            data/tft_regime_tree_rules.txt
+            data/tft_regime_tree_importance.csv
+            data/tft_cross_window_predictions.parquet
+            data/tft_cross_window_metrics.csv
+            data/tft_vintage_training_regime_profile.csv
+            data/tft_stage_timings.csv
+            data/tft_vintage_shards/**
+            data/tft_cross_window_tree_metrics.csv
+            data/tft_cross_window_tree_rules.txt
+            data/tft_cross_window_tree_importance.csv
+            data/tft_cross_window_tree_bundle.joblib
+            data/tft_model_vintages/**
+            data/tft_wandb_run.json
+            data/catboost_prediction_level.csv
+            data/catboost_walkforward_fold_metrics.csv
+            data/catboost_regime_analysis.csv
+            data/catboost_regime_tree_rules.txt
+            data/catboost_regime_tree_importance.csv
+            data/catboost_cross_window_predictions.parquet
+            data/catboost_cross_window_metrics.csv
+            data/catboost_vintage_training_regime_profile.csv
+            data/catboost_cross_window_tree_metrics.csv
+            data/catboost_cross_window_tree_rules.txt
+            data/catboost_cross_window_tree_importance.csv
+            data/catboost_cross_window_tree_bundle.joblib
+            data/catboost_model_vintages/**
+            catboost_regime_aware_model.cbm
+            data/catboost_wandb_run.json
+          overwrite: true
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Publish interactive regime report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regime-insights-${{ github.run_number }}
+          path: |
+            analysis/regime_automation/**
+            scripts/analyze_regime_artifacts.py
+            scripts/regime_analysis_dashboard.py
+            scripts/regime_run_metadata.py
+            scripts/portfolio_backtest.py
+            requirements-analysis.txt
+            config/regime_analysis_thresholds.json
+            config/portfolio_backtest.json
+            docs/portfolio_backtest_assumptions.md
+          overwrite: true
+          if-no-files-found: warn
+          retention-days: 30
 
     # # =========================================================================
     # # MODELOS DE CLASIFICACIÓN (DIRECCIONAL SUBE/BAJA)
