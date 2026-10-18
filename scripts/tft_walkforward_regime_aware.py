@@ -1066,11 +1066,15 @@ def build_prediction_level_dataframe(
         last_indices[:, None] - decoder_length + horizons[None, :]
     )
     origin_indices = last_indices - decoder_length
-    if not np.array_equal(
-        target_indices - horizons[None, :],
-        origin_indices[:, None],
+    # np.array_equal also requires identical shapes; here the left side is
+    # (samples, horizons) and the right side is (samples, 1). Compare after
+    # broadcasting so each horizon is checked against its sample's origin.
+    if not np.all(
+        target_indices - horizons[None, :] == origin_indices[:, None]
     ):
-        raise AssertionError("El origen reconstruido no coincide con el encoder.")
+        raise AssertionError(
+            "El origen reconstruido no es coherente con los índices de horizonte."
+        )
 
     ticker_rows = np.repeat(tickers, decoder_length)
     target_rows = target_indices.reshape(-1)
